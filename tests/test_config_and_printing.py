@@ -15,6 +15,14 @@ class ConfigAndPrintingTest(unittest.TestCase):
             config = load_config(Path(temp_dir) / "missing.json")
         self.assertFalse(config.enable_office_pdf_on_mac)
         self.assertEqual("2918", config.reserved1_sub)
+        self.assertEqual("image", config.barcode_mode)
+        self.assertTrue(config.barcode_show_text)
+        self.assertEqual("excel_com", config.pdf_renderer)
+        self.assertEqual("excel_com", config.print_method)
+        self.assertTrue(config.debug_no_print_on_mac)
+        self.assertEqual("reportlab", config.mac_pdf_renderer)
+        self.assertEqual("excel_com", config.windows_pdf_renderer)
+        self.assertEqual("excel_com", config.windows_print_method)
 
     def test_non_windows_print_failure_preserves_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_text:

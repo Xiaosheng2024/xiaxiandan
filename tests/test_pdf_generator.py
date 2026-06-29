@@ -52,6 +52,7 @@ class A5PdfGeneratorTest(unittest.TestCase):
                 log_path=temp_dir / "pdf.log",
                 enable_libreoffice=False,
                 enable_excel_com=False,
+                barcode_output_dir=temp_dir / "barcodes",
             )
             generator.create_workbook_copy(_label(), copy_path)
 
@@ -73,6 +74,14 @@ class A5PdfGeneratorTest(unittest.TestCase):
                 self.assertEqual("landscape", sheet.page_setup.orientation)
                 self.assertEqual(18, len(sheet.merged_cells.ranges))
                 self.assertEqual(0, sheet.page_margins.left)
+                self.assertIsNone(sheet["A9"].value)
+                self.assertIsNone(sheet["F3"].value)
+                self.assertIsNone(sheet["F8"].value)
+                self.assertIsNone(sheet["F10"].value)
+                self.assertEqual(5, len(sheet._images))
+                self.assertEqual(
+                    4, len(list((temp_dir / "barcodes").glob("*.png")))
+                )
             finally:
                 workbook.close()
 
@@ -97,6 +106,7 @@ class A5PdfGeneratorTest(unittest.TestCase):
                 log_path=temp_dir / "pdf.log",
                 enable_libreoffice=False,
                 enable_excel_com=False,
+                barcode_output_dir=temp_dir / "barcodes",
             )
             with self.assertRaisesRegex(
                 PdfGenerationError, "模板存在未赋值占位符"
@@ -112,6 +122,7 @@ class A5PdfGeneratorTest(unittest.TestCase):
                 TEMPLATE,
                 log_path=log_path,
                 enable_excel_com=False,
+                barcode_output_dir=temp_dir / "barcodes",
             )
             generator.soffice_path = Path("/fake/soffice")
             with patch.object(
@@ -139,6 +150,7 @@ class A5PdfGeneratorTest(unittest.TestCase):
                 log_path=temp_dir / "pdf.log",
                 enable_libreoffice=False,
                 enable_excel_com=False,
+                barcode_output_dir=temp_dir / "barcodes",
             )
             result = generator.generate(_label(), output)
 
@@ -146,6 +158,8 @@ class A5PdfGeneratorTest(unittest.TestCase):
             self.assertEqual(1, len(reader.pages))
             page = reader.pages[0]
             self.assertGreater(float(page.mediabox.width), float(page.mediabox.height))
+            self.assertGreaterEqual(len(page.images), 4)
+            self.assertTrue(output.with_suffix(".xlsx").is_file())
             self.assertEqual("reportlab_fallback", generator.last_renderer)
 
     def test_generation_does_not_modify_original_template(self) -> None:
@@ -157,6 +171,7 @@ class A5PdfGeneratorTest(unittest.TestCase):
                 log_path=temp_dir / "pdf.log",
                 enable_libreoffice=False,
                 enable_excel_com=False,
+                barcode_output_dir=temp_dir / "barcodes",
             )
             generator.generate(_label(), temp_dir / "sample.pdf")
         self.assertEqual(before, _sha256(TEMPLATE))

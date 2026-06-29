@@ -5,12 +5,19 @@ from .pdf_generator import (
     OfflineOrderLabel,
     PdfGenerationError,
 )
-from .printing import PrintResult, SumatraPdfPrinter
+from .printing import (
+    DebugNoPrintPrinter,
+    ExcelComPrinter,
+    PrintResult,
+    SumatraPdfPrinter,
+)
 
 __all__ = [
     "A5PdfGenerator",
     "OfflineOrderLabel",
     "PdfGenerationError",
     "PrintResult",
+    "ExcelComPrinter",
+    "DebugNoPrintPrinter",
     "SumatraPdfPrinter",
 ]

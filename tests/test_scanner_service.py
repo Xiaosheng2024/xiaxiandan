@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ehx_guard.config import RuntimeConfig
 from ehx_guard.database import Database
@@ -211,6 +212,28 @@ class ScannerServiceTest(unittest.TestCase):
         self.assertEqual("PRINT_FAILED", order["status"])
         self.assertTrue(Path(order["pdf_path"]).is_file())
         self.assertEqual(order_no, service.state.offline_order_no)
+
+    def test_macos_debug_generates_pdf_only_and_starts_next_box(self) -> None:
+        pdf = FakePdfGenerator()
+        first_order = None
+        with patch("ehx_guard.scanner_service.platform.system", return_value="Darwin"):
+            service = ScannerService(
+                self._config(1),
+                self.database,
+                self.materials,
+                pdf_generator=pdf,
+                mii_client=FakeMii(),
+            )
+            first_order = service.state.offline_order_no
+            outcome = service.process_barcode(BARCODE_A1)
+
+        order = self.database.get_order(first_order)
+        self.assertEqual("PDF已生成", outcome.result)
+        self.assertFalse(outcome.printed)
+        self.assertEqual("PDF_ONLY", order["status"])
+        self.assertEqual(0, order["printed"])
+        self.assertTrue(Path(order["pdf_path"]).is_file())
+        self.assertNotEqual(first_order, service.state.offline_order_no)
 
 
 if __name__ == "__main__":

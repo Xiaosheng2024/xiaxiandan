@@ -1,10 +1,18 @@
 # A5 下线单 PDF 生成
 
 生成器只读原始 Excel 模板。每次生成时先在临时目录创建模板副本并替换占位符。
-Windows 按 LibreOffice、ReportLab fallback 的顺序渲染。macOS 默认完全跳过
-LibreOffice，直接使用 ReportLab fallback；只有配置
-`enable_office_pdf_on_mac=true` 时才允许调用 soffice。只有转换和尺寸校验全部
-成功后，PDF 才会原子写入目标路径。
+Windows 使用 Microsoft Excel COM 导出 PDF；macOS 仅使用 ReportLab fallback
+进行开发验证。只有转换和尺寸校验全部成功后，PDF 才会原子写入目标路径。
+
+默认条码模式为 `image`：程序生成 Code128 PNG 并嵌入模板副本，不依赖 Code128
+字体。模板中的四个条码区域分别为：
+
+| 内容 | 图片锚点 |
+| --- | --- |
+| 供应商物料号 | `A9` |
+| 客户物料号 | `F3` |
+| 数量 | `F8` |
+| Batch / 下线单号 | `F10` |
 
 ## 模板字段
 
@@ -28,9 +36,9 @@ LibreOffice，直接使用 ReportLab fallback；只有配置
 
 1. Python 3.10 或更高版本。
 2. 执行 `pip install -r requirements.txt`。
-3. 安装 LibreOffice。
-4. 安装模板使用的 `Code 128` 字体，否则模板转换产生的条码可能显示为普通文本。
-5. LibreOffice 不可用时，程序自动使用 ReportLab fallback。
+3. 安装 Microsoft Excel 和 `pywin32`。
+4. 不需要安装 LibreOffice、SumatraPDF 或 Code128 字体。
+5. Excel COM 不可用时，程序可使用 ReportLab fallback 生成简化 PDF。
 
 ## JSON 示例
 

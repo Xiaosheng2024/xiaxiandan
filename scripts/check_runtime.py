@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ehx_guard.config import load_config
-from ehx_guard.pdf_generator import find_soffice
+from ehx_guard.pdf_generator import find_soffice, is_excel_com_available
 from ehx_guard.printing import find_sumatra
 
 
@@ -211,6 +211,7 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
         config.sumatra_path
     )
     code128_ok, code128_detail = _check_code128_font()
+    excel_com_ok, excel_com_detail = is_excel_com_available()
     default_printer, printers, configured_printer_exists = _printer_status(
         config.printer_name
     )
@@ -221,14 +222,24 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
     return {
         "Windows/系统版本": platform.platform(),
         "Python版本": sys.version.replace("\n", " "),
-        "LibreOffice找到": libreoffice_ok,
+        "Microsoft Excel COM可用": excel_com_ok,
+        "Microsoft Excel COM详情": excel_com_detail,
+        "pywin32已安装": _module_available("win32com"),
+        "LibreOffice找到（兼容备用）": libreoffice_ok,
         "LibreOffice路径": libreoffice_path or "未找到",
         "LibreOffice详情": libreoffice_detail,
-        "SumatraPDF找到": sumatra_ok,
+        "SumatraPDF找到（兼容备用）": sumatra_ok,
         "SumatraPDF路径": sumatra_path or "未找到",
         "SumatraPDF详情": sumatra_detail,
-        "Code128字体检测到": code128_ok,
-        "Code128字体详情": code128_detail,
+        "Code128字体检测到（font备用模式）": code128_ok,
+        "Code128字体详情": (
+            code128_detail
+            if config.barcode_mode == "font"
+            else "image 模式不依赖 Code128 字体"
+        ),
+        "条码模式": config.barcode_mode,
+        "PDF渲染器": config.pdf_renderer,
+        "打印方式": config.print_method,
         "reportlab已安装": _module_available("reportlab"),
         "openpyxl已安装": _module_available("openpyxl"),
         "当前默认打印机": default_printer,
@@ -245,13 +256,14 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
         "SQLite详情": sqlite_detail,
         "enable_office_pdf_on_mac": config.enable_office_pdf_on_mac,
         "当前平台PDF策略": (
-            "LibreOffice -> ReportLab fallback"
+            "Excel COM -> ReportLab fallback"
             if os.name == "nt"
             else (
-                "LibreOffice -> ReportLab fallback（已由配置显式开启）"
-                if config.enable_office_pdf_on_mac
-                else "ReportLab fallback（macOS 默认跳过 soffice）"
+                "ReportLab fallback（macOS 仅开发验证）"
             )
+        ),
+        "Windows必需项": (
+            "Excel COM、pywin32、打印机驱动、模板访问权限"
         ),
     }
 

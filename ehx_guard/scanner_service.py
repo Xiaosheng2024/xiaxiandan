@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import platform
 import socket
 import sqlite3
 from dataclasses import dataclass
@@ -15,7 +16,12 @@ from .database import Database
 from .materials import Material, MaterialRepository
 from .mii_client import MiiClient
 from .pdf_generator import A5PdfGenerator, OfflineOrderLabel
-from .printing import PrintResult, SumatraPdfPrinter
+from .printing import (
+    DebugNoPrintPrinter,
+    ExcelComPrinter,
+    PrintResult,
+    SumatraPdfPrinter,
+)
 
 
 @dataclass(frozen=True)
@@ -60,16 +66,43 @@ class ScannerService:
         self.materials.load()
         self.logger = logger or logging.getLogger("ehx_guard.scanner")
         self.computer_name = socket.gethostname()
+        system_name = platform.system()
+        if system_name == "Darwin":
+            pdf_renderer = config.mac_pdf_renderer
+        elif system_name == "Windows":
+            pdf_renderer = config.windows_pdf_renderer
+        else:
+            pdf_renderer = "reportlab"
         self.pdf_generator = pdf_generator or A5PdfGenerator(
             config.template_path,
             soffice_path=config.libreoffice_path or None,
+            enable_libreoffice=False,
             enable_office_pdf_on_mac=config.enable_office_pdf_on_mac,
+            barcode_mode=config.barcode_mode,
+            barcode_show_text=config.barcode_show_text,
+            barcode_output_dir=config.barcode_output_dir,
+            pdf_renderer=pdf_renderer,
         )
-        self.printer = printer or SumatraPdfPrinter(
-            sumatra_path=config.sumatra_path or None,
-            printer_name=config.printer_name,
-            logger=getattr(self.pdf_generator, "logger", self.logger),
-        )
+        if printer is not None:
+            self.printer = printer
+        elif system_name == "Darwin" and config.debug_no_print_on_mac:
+            self.printer = DebugNoPrintPrinter(
+                logger=getattr(self.pdf_generator, "logger", self.logger)
+            )
+        elif (
+            system_name == "Windows"
+            and config.windows_print_method == "excel_com"
+        ):
+            self.printer = ExcelComPrinter(
+                printer_name=config.printer_name,
+                logger=getattr(self.pdf_generator, "logger", self.logger),
+            )
+        else:
+            self.printer = SumatraPdfPrinter(
+                sumatra_path=config.sumatra_path or None,
+                printer_name=config.printer_name,
+                logger=getattr(self.pdf_generator, "logger", self.logger),
+            )
         self.mii_client = mii_client or MiiClient(
             enabled=config.mii_enabled,
             base_url=config.mii_base_url,
@@ -188,9 +221,9 @@ class ScannerService:
         order = self.database.get_order(offline_order_no)
         pdf_path = Path(order["pdf_path"])
         result = self.printer.print_pdf(pdf_path)
-        if result.success:
+        if result.success and not result.skipped:
             self.database.mark_printed(offline_order_no, reprint=True)
-        else:
+        elif not result.success:
             self.database.update_order_status(
                 offline_order_no,
                 "PRINT_FAILED",
@@ -315,7 +348,15 @@ class ScannerService:
                 box_completed=True,
             )
 
-        self.database.mark_printed(current.offline_order_no)
+        if print_result.skipped:
+            self.database.update_order_status(
+                current.offline_order_no,
+                "PDF_ONLY",
+                pdf_path=str(pdf_path.resolve()),
+                print_error="",
+            )
+        else:
+            self.database.mark_printed(current.offline_order_no)
         completed_order = self.database.get_order(current.offline_order_no)
         self.mii_client.upload_offline_order(
             {
@@ -329,14 +370,20 @@ class ScannerService:
             }
         )
         self._order = self._create_next_order()
+        result_name = "PDF已生成" if print_result.skipped else "打印完成"
+        result_message = (
+            "PDF已生成，macOS调试模式已跳过打印"
+            if print_result.skipped
+            else "PDF已生成，打印已发送"
+        )
         return ScanOutcome(
             True,
-            "打印完成",
-            "满箱校验通过，PDF已生成并提交打印",
+            result_name,
+            result_message,
             triggering_barcode,
             self.state,
             box_completed=True,
-            printed=True,
+            printed=not print_result.skipped,
         )
 
     def _create_next_order(self) -> dict[str, Any]:

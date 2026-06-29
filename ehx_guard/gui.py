@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+import platform
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -41,6 +43,7 @@ STATUS_COLORS = {
     "PDF生成失败": "#b91c1c",
     "打印失败": "#b45309",
     "打印完成": "#0369a1",
+    "PDF已生成": "#0369a1",
 }
 
 
@@ -74,6 +77,18 @@ class MainWindow(QWidget):
         title = QLabel("EHX 下线防错")
         title.setFont(QFont("Microsoft YaHei", 28, QFont.Weight.Bold))
         title_row.addWidget(title)
+        mode_text = (
+            "macOS 调试模式：只生成PDF，不打印"
+            if platform.system() == "Darwin"
+            else "Windows 正式模式：生成PDF并打印"
+        )
+        mode_label = QLabel(mode_text)
+        mode_label.setStyleSheet(
+            "background: #dbeafe; color: #1e3a8a; padding: 10px;"
+            " border-radius: 8px;"
+        )
+        mode_label.setFont(QFont("Microsoft YaHei", 14, QFont.Weight.Bold))
+        title_row.addWidget(mode_label)
         title_row.addStretch()
         history_button = QPushButton("历史查询 / 补打")
         history_button.clicked.connect(self._open_history)
@@ -236,9 +251,12 @@ class HistoryDialog(QDialog):
         search_button.clicked.connect(self._search)
         reprint_button = QPushButton("补打所选下线单")
         reprint_button.clicked.connect(self._reprint)
+        open_pdf_button = QPushButton("打开PDF")
+        open_pdf_button.clicked.connect(self._open_pdf)
         controls.addWidget(self.query_type)
         controls.addWidget(self.query_text, 1)
         controls.addWidget(search_button)
+        controls.addWidget(open_pdf_button)
         controls.addWidget(reprint_button)
         root.addLayout(controls)
 
@@ -314,6 +332,19 @@ class HistoryDialog(QDialog):
         else:
             QMessageBox.warning(self, "补打失败", result.message)
 
+    def _open_pdf(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "打开PDF", "请先选择一条记录")
+            return
+        order_no = self.table.item(row, 0).text()
+        order = self.service.database.get_order(order_no)
+        pdf_path = Path(order["pdf_path"])
+        if not pdf_path.is_file():
+            QMessageBox.warning(self, "打开PDF", "该下线单没有可用PDF")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path.resolve())))
+
 
 def build_service(config_path: str | Path = "config.json") -> ScannerService:
     config_file = Path(config_path).expanduser().resolve()
@@ -330,6 +361,7 @@ def build_service(config_path: str | Path = "config.json") -> ScannerService:
         output_pdf_dir=resolve_config_path(config.output_pdf_dir),
         database_path=resolve_config_path(config.database_path),
         material_excel_path=resolve_config_path(config.material_excel_path),
+        barcode_output_dir=resolve_config_path(config.barcode_output_dir),
     )
     database = Database(config.database_path)
     materials = MaterialRepository(database, config.material_excel_path)

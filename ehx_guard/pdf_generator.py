@@ -17,14 +17,18 @@ from pathlib import Path
 from typing import Mapping
 
 from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as ExcelImage
 from pypdf import PdfReader
 from reportlab.graphics.barcode import code128
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A5, landscape
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
+
+from .barcode_service import generate_code128_png
 
 
 class PdfGenerationError(RuntimeError):
@@ -88,6 +92,10 @@ class A5PdfGenerator:
         enable_libreoffice: bool = True,
         enable_excel_com: bool = False,
         enable_office_pdf_on_mac: bool = False,
+        barcode_mode: str = "image",
+        barcode_show_text: bool = True,
+        barcode_output_dir: str | Path = "output/barcodes",
+        pdf_renderer: str = "excel_com",
     ) -> None:
         self.template_path = Path(template_path).expanduser().resolve()
         if not self.template_path.is_file():
@@ -102,6 +110,14 @@ class A5PdfGenerator:
             and not enable_office_pdf_on_mac
         )
         self.enable_excel_com = enable_excel_com
+        self.barcode_mode = barcode_mode.strip().lower()
+        if self.barcode_mode not in {"image", "font"}:
+            raise ValueError("barcode_mode 必须是 image 或 font")
+        self.barcode_show_text = barcode_show_text
+        self.barcode_output_dir = (
+            Path(barcode_output_dir).expanduser().resolve()
+        )
+        self.pdf_renderer = pdf_renderer.strip().lower()
         self.temp_root = (
             Path(temp_root).expanduser().resolve() if temp_root else None
         )
@@ -133,6 +149,8 @@ class A5PdfGenerator:
             )
             _validate_a5_landscape_pdf(generated_pdf)
             _atomic_copy(generated_pdf, target)
+            # Excel COM 直接打印此模板副本；与 PDF 同名便于打印器定位。
+            _atomic_copy(workbook_path, target.with_suffix(".xlsx"))
 
         self.logger.info(
             "PDF 生成成功 renderer=%s order=%s output=%s",
@@ -180,12 +198,63 @@ class A5PdfGenerator:
                 raise PdfGenerationError(
                     "模板存在未赋值占位符：" + ", ".join(sorted(unresolved))
                 )
+            if self.barcode_mode == "image":
+                self._insert_barcode_images(workbook, label)
             workbook.save(destination_path)
         finally:
             workbook.close()
 
         self.logger.info("模板副本生成成功 path=%s", destination_path)
         return destination_path
+
+    def _insert_barcode_images(
+        self, workbook: object, label: OfflineOrderLabel
+    ) -> None:
+        worksheet = workbook["标签"]
+        specifications = (
+            (
+                "material",
+                label.material_code,
+                "A9",
+                190,
+                52,
+            ),
+            (
+                "customer",
+                label.customer_material_code,
+                "F3",
+                170,
+                52,
+            ),
+            ("quantity", str(label.quantity), "F8", 95, 48),
+            (
+                "batch",
+                label.offline_order_no,
+                "F10",
+                180,
+                56,
+            ),
+        )
+        for field_name, value, anchor, width, height in specifications:
+            image_path = generate_code128_png(
+                value,
+                self._barcode_image_path(label, field_name),
+                show_text=self.barcode_show_text,
+            )
+            # 清除原来依赖 Code128 字体的文本，但保留相邻明文字段。
+            worksheet[anchor] = None
+            image = ExcelImage(str(image_path))
+            image.width = width
+            image.height = height
+            worksheet.add_image(image, anchor)
+
+    def _barcode_image_path(
+        self, label: OfflineOrderLabel, field_name: str
+    ) -> Path:
+        safe_order = re.sub(
+            r"[^A-Za-z0-9_.-]+", "_", label.offline_order_no
+        )
+        return self.barcode_output_dir / f"{safe_order}_{field_name}.png"
 
     def _render_with_fallbacks(
         self,
@@ -195,8 +264,26 @@ class A5PdfGenerator:
     ) -> Path:
         failures: list[str] = []
 
-        # Windows 正式环境优先 LibreOffice；macOS 默认在构造器中禁用。
-        if self.soffice_path:
+        # Windows 正式环境默认使用 Microsoft Excel COM。
+        if self.pdf_renderer == "excel_com" and os.name == "nt":
+            excel_available, excel_detail = is_excel_com_available()
+            if excel_available:
+                try:
+                    output = temp_dir / "excel_com.pdf"
+                    self._convert_with_excel_com(workbook_path, output)
+                    _validate_a5_landscape_pdf(output)
+                    self.last_renderer = "excel_com"
+                    return output
+                except Exception as exc:
+                    detail = f"Excel COM 渲染失败：{exc}"
+                    failures.append(detail)
+                    self.logger.exception(detail)
+            else:
+                failures.append(f"Excel COM 不可用：{excel_detail}")
+                self.logger.error(failures[-1])
+
+        # 兼容旧部署：仅明确选择 libreoffice 时才尝试。
+        if self.pdf_renderer == "libreoffice" and self.soffice_path:
             try:
                 output = temp_dir / "libreoffice.pdf"
                 self._convert_with_libreoffice(workbook_path, output, temp_dir)
@@ -207,7 +294,7 @@ class A5PdfGenerator:
                 detail = f"LibreOffice 渲染失败：{exc}"
                 failures.append(detail)
                 self.logger.exception(detail)
-        else:
+        elif self.pdf_renderer == "libreoffice":
             if self.office_pdf_skipped_on_mac:
                 self.logger.info(
                     "macOS 默认跳过 LibreOffice；"
@@ -216,8 +303,12 @@ class A5PdfGenerator:
             else:
                 self.logger.warning("LibreOffice 不可用，跳过 LibreOffice 渲染")
 
-        # 兼容保留：仅显式启用时在 Windows 尝试 Excel COM。
-        if self.enable_excel_com and os.name == "nt":
+        # 兼容旧配置：显式启用 COM 时仍可在 LibreOffice 失败后尝试。
+        if (
+            self.pdf_renderer != "excel_com"
+            and self.enable_excel_com
+            and os.name == "nt"
+        ):
             excel_available, excel_detail = is_excel_com_available()
             if excel_available:
                 try:
@@ -399,8 +490,15 @@ class A5PdfGenerator:
         )
         _draw_label(pdf, "供应商零件号", x0 + 6, y_time - 16)
         _draw_text(pdf, label.material_code, x0 + 6, y_time - 44, 13)
-        _draw_code128(
-            pdf, label.material_code, x0 + 7, y_time - 91, left_width - 14, 34
+        self._draw_fallback_barcode(
+            pdf,
+            label,
+            "material",
+            label.material_code,
+            x0 + 7,
+            y_time - 97,
+            left_width - 14,
+            45,
         )
         _draw_label(pdf, "产品类型", x0 + 6, y_material - 18)
         _draw_text(pdf, "FG", x0 + 18, bottom + 28, 22)
@@ -443,36 +541,79 @@ class A5PdfGenerator:
         _draw_centered_text(
             pdf, label.customer_material_code, x2, x3, top - 49, 16
         )
-        _draw_code128(
+        self._draw_fallback_barcode(
             pdf,
+            label,
+            "customer",
             label.customer_material_code,
             x2 + 12,
-            y_customer + 12,
+            y_customer + 8,
             x3 - x2 - 24,
-            30,
+            45,
         )
         _draw_label(pdf, "数量", x3 - 34, y_customer - 17)
         _draw_centered_text(
             pdf, str(label.quantity), x2, x3, y_customer - 55, 31
         )
-        _draw_code128(
-            pdf, str(label.quantity), x2 + 43, y_quantity + 12, x3 - x2 - 86, 25
+        self._draw_fallback_barcode(
+            pdf,
+            label,
+            "quantity",
+            str(label.quantity),
+            x2 + 43,
+            y_quantity + 8,
+            x3 - x2 - 86,
+            40,
         )
         _draw_label(pdf, "批次号 / 下线单号", x2 + 64, y_quantity - 18)
         _draw_centered_text(
             pdf, label.offline_order_no, x2, x3, y_quantity - 53, 13
         )
-        _draw_code128(
+        self._draw_fallback_barcode(
             pdf,
+            label,
+            "batch",
             label.offline_order_no,
             x2 + 12,
-            bottom + 22,
+            bottom + 14,
             x3 - x2 - 24,
-            34,
+            48,
         )
 
         pdf.showPage()
         pdf.save()
+
+    def _draw_fallback_barcode(
+        self,
+        pdf: canvas.Canvas,
+        label: OfflineOrderLabel,
+        field_name: str,
+        value: str,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+    ) -> None:
+        if self.barcode_mode == "image":
+            image_path = self._barcode_image_path(label, field_name)
+            if not image_path.is_file():
+                generate_code128_png(
+                    value,
+                    image_path,
+                    show_text=self.barcode_show_text,
+                )
+            pdf.drawImage(
+                ImageReader(str(image_path)),
+                x,
+                y,
+                width=width,
+                height=height,
+                preserveAspectRatio=True,
+                anchor="c",
+                mask="auto",
+            )
+        else:
+            _draw_code128(pdf, value, x, y, width, height)
 
 
 def find_soffice(explicit_path: str | Path | None = None) -> Path | None:

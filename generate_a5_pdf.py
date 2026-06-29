@@ -35,6 +35,10 @@ def main() -> None:
         template,
         soffice_path=soffice,
         enable_office_pdf_on_mac=config.enable_office_pdf_on_mac,
+        barcode_mode=config.barcode_mode,
+        barcode_show_text=config.barcode_show_text,
+        barcode_output_dir=config.barcode_output_dir,
+        pdf_renderer=config.pdf_renderer,
     )
     result = generator.generate(OfflineOrderLabel(**data), args.output_pdf)
     print(result)

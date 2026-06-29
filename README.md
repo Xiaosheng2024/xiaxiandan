@@ -10,20 +10,20 @@
 
 ### Windows 现场
 
-1. LibreOffice headless：使用 Excel 模板副本转换 PDF，保留合并单元格、字体、
-   Code 128 字体、打印区域、A5 横向和分页设置。
-2. ReportLab fallback：LibreOffice 不可用或转换失败时生成简化的单页 A5 PDF，包含
-   完整字段和可扫描的 Code 128 条码。
-3. SumatraPDF：将生成成功的 PDF 静默发送到配置打印机；打印失败保留 PDF 和业务
-   数据，供历史记录补打。
+1. 程序使用 ReportLab 编码规则和 Pillow 生成 Code128 PNG，不依赖条码字体。
+2. openpyxl 将 PNG 嵌入 Excel 模板副本，保留合并单元格、打印区域、页边距和
+   A5 横向设置。
+3. Microsoft Excel COM 使用 `ExportAsFixedFormat` 导出 PDF 留档。
+4. Microsoft Excel COM 使用 `PrintOut` 直接打印同名 XLSX。
+5. Excel COM 失败时可用 ReportLab fallback 生成简化 PDF；失败数据和文件保留，
+   可从历史记录补打。
 
 ### macOS 开发环境
 
-macOS 只用于代码开发和逻辑验证，默认完全跳过 soffice，直接使用 ReportLab
-fallback。Mac 不验收正式 Excel 模板转换效果和真实打印效果。只有在
-`config.json` 明确设置 `"enable_office_pdf_on_mac": true` 时才允许调用 soffice。
+macOS 只用于代码开发和逻辑验证，直接使用 ReportLab fallback。Mac 不验收正式
+Excel 模板转换效果和真实打印效果。
 
-Windows 才是正式 PDF 版式、Code128 字体、打印区域、A5 横向和物理打印验收环境。
+Windows 才是正式 Excel 模板、打印区域、A5 横向和物理打印验收环境。
 
 ## 安装
 
@@ -33,8 +33,8 @@ py -3 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Windows 正式环境安装 LibreOffice、SumatraPDF 和 Code128 字体。ReportLab fallback
-使用程序内置条码绘制，不依赖 Code128 字体。
+Windows 正式环境只要求已安装 Microsoft Excel、Python 依赖和打印机驱动，不要求
+安装 LibreOffice、SumatraPDF 或 Code128 字体。
 
 ## config.json
 
@@ -54,7 +54,16 @@ Windows 正式环境安装 LibreOffice、SumatraPDF 和 Code128 字体。ReportL
   "material_excel_path": "EHX物料号匹配.xlsx",
   "mii_enabled": false,
   "mii_base_url": "",
-  "mii_token": ""
+  "mii_token": "",
+  "barcode_mode": "image",
+  "barcode_show_text": true,
+  "barcode_output_dir": "output/barcodes",
+  "pdf_renderer": "excel_com",
+  "print_method": "excel_com",
+  "debug_no_print_on_mac": true,
+  "mac_pdf_renderer": "reportlab",
+  "windows_pdf_renderer": "excel_com",
+  "windows_print_method": "excel_com"
 }
 ```
 
@@ -62,14 +71,19 @@ Windows 正式环境安装 LibreOffice、SumatraPDF 和 Code128 字体。ReportL
 为 `2918`。它与物料条码无关，不会改变 `5664620-CLBK06` 等物料前缀。客户后续
 变更公司代码时，只需修改 `config.json`。
 
-`libreoffice_path` 和 `sumatra_path` 为空时自动检查：
-
-- `C:\Program Files\LibreOffice\program\soffice.exe`
-- `C:\Program Files (x86)\LibreOffice\program\soffice.exe`
-- `C:\Program Files\SumatraPDF\SumatraPDF.exe`
-- `C:\Program Files (x86)\SumatraPDF\SumatraPDF.exe`
-
 `printer_name` 为空时使用 Windows 默认打印机。
+
+默认 `barcode_mode=image`。程序生成并嵌入 PNG，`barcode_show_text` 控制条码图片
+下方是否显示明文。旧模板字体方式仅作为兼容备用，可配置为
+`"barcode_mode": "font"`。
+
+默认 `pdf_renderer=excel_com`、`print_method=excel_com`。生成 PDF 时会在同一目录
+保留同名 XLSX，打印时 Excel COM 直接打开该模板副本并执行 `PrintOut`。
+
+macOS 使用 `mac_pdf_renderer=reportlab` 且
+`debug_no_print_on_mac=true`：满箱后生成 PDF、将订单记为 `PDF_ONLY`，界面显示
+“PDF已生成，已跳过打印”，随后自动进入下一箱。macOS 不会调用 soffice、Excel
+COM 或 Windows 打印。
 
 `box_scan_count` 是每箱需要成功扫描的数量。物料号不写死在程序中，首次启动时
 从 `material_excel_path` 导入 SQLite 的 `material_mapping` 表，后续也可以从
@@ -152,16 +166,16 @@ python generate_a5_pdf.py order.json output\pdf\EHX20260629185500.pdf
 
 ## Windows 部署与验收步骤
 
-1. 安装 Code128 条形码字体，注销或重启 Windows 后确认字体已注册。
-2. 安装 `LibreOffice_25.8.4_Win_x86-64.msi`。
-3. 安装 `SumatraPDF-3.5.2-64-install.exe`。
-4. 修改 `config.json`，填写打印机名称；非默认安装路径时填写两个程序路径。
-5. 运行 `python scripts\check_runtime.py`，确认模板、字体、PDF、日志、SQLite、
-   LibreOffice、SumatraPDF 和打印机检查通过。
+1. 确认 Microsoft Excel 可以正常启动并打开模板。
+2. 安装 Python 依赖，其中 Windows 必须安装 `pywin32`。
+3. 安装打印机驱动并打印 Windows 测试页。
+4. 修改 `config.json`，填写打印机名称。
+5. 运行 `python scripts\check_runtime.py`，确认 Excel COM、pywin32、模板、
+   PDF/条码输出目录、SQLite 和打印机检查通过。
 6. 启动 EHX 下线防错程序。
 7. 扫描一组正常、重复、混料和未配置条码，验证防错提示。
 8. 扫满一箱，检查生成的 PDF 为单页 A5 横向且模板字段完整。
-9. 检查 SumatraPDF 是否自动静默打印，并用扫码枪验证纸面条码。
+9. 检查 Excel COM 是否直接打印 XLSX，并用扫码枪验证纸面条码。
 10. 模拟打印失败，确认 PDF 和数据库记录仍保留，再从历史记录执行补打。
 
 额外检查：
@@ -169,7 +183,7 @@ python generate_a5_pdf.py order.json output\pdf\EHX20260629185500.pdf
 - Windows 10/11 64 位，打印机驱动已安装且测试页正常。
 - `printer_name` 必须与 Windows 打印机列表中的名称完全一致。
 - 程序对 `output/pdf`、`logs`、`data` 和临时目录具有写权限。
-- 7-Zip 和 AweSun 可以作为安装、维护工具，但不是程序运行依赖。
+- LibreOffice、SumatraPDF、Code128 字体、7-Zip 和 AweSun 均不是程序运行依赖。
 
 ## SQLite
 

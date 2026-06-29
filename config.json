@@ -13,5 +13,14 @@
   "material_excel_path": "EHX物料号匹配.xlsx",
   "mii_enabled": false,
   "mii_base_url": "",
-  "mii_token": ""
+  "mii_token": "",
+  "barcode_mode": "image",
+  "barcode_show_text": true,
+  "barcode_output_dir": "output/barcodes",
+  "pdf_renderer": "excel_com",
+  "print_method": "excel_com",
+  "debug_no_print_on_mac": true,
+  "mac_pdf_renderer": "reportlab",
+  "windows_pdf_renderer": "excel_com",
+  "windows_print_method": "excel_com"
 }
