@@ -47,10 +47,52 @@ STATUS_COLORS = {
 }
 
 
+class ErrorPopup(QDialog):
+    """产线用非阻塞错误提示窗。"""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("扫码错误")
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setMinimumWidth(620)
+        self.setStyleSheet(
+            "QDialog { background: #fff7ed; border: 5px solid #b91c1c; }"
+            "QLabel { color: #991b1b; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        self.title_label = QLabel()
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setFont(
+            QFont("Microsoft YaHei", 28, QFont.Weight.Bold)
+        )
+        self.message_label = QLabel()
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setFont(QFont("Microsoft YaHei", 20))
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.message_label)
+
+    def set_error(self, title: str, message: str) -> None:
+        self.title_label.setText(title)
+        self.message_label.setText(message)
+        self.adjustSize()
+
+    def text(self) -> str:
+        return self.title_label.text()
+
+
 class MainWindow(QWidget):
     def __init__(self, service: ScannerService) -> None:
         super().__init__()
         self.service = service
+        self.error_dialog: ErrorPopup | None = None
+        self.error_close_timer = QTimer(self)
+        self.error_close_timer.setSingleShot(True)
+        self.error_close_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.error_close_timer.setInterval(3000)
+        self.error_close_timer.timeout.connect(self._close_error_popup)
         self.setWindowTitle("EHX 下线防错程序")
         self.setStyleSheet(
             "QWidget { background: #f1f5f9; color: #0f172a; }"
@@ -89,7 +131,20 @@ class MainWindow(QWidget):
         )
         mode_label.setFont(QFont("Microsoft YaHei", 14, QFont.Weight.Bold))
         title_row.addWidget(mode_label)
-        title_row.addStretch()
+        title_row.addStretch(1)
+        self.progress_big_label = QLabel("0/0")
+        self.progress_big_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_big_label.setMinimumWidth(240)
+        self.progress_big_label.setFont(
+            QFont("Arial", 56, QFont.Weight.Black)
+        )
+        self.progress_big_label.setStyleSheet(
+            "background: #ffffff; color: #0f172a;"
+            " border: 3px solid #0f172a; border-radius: 12px;"
+            " padding: 2px 18px;"
+        )
+        title_row.addWidget(self.progress_big_label)
+        title_row.addStretch(1)
         history_button = QPushButton("历史查询 / 补打")
         history_button.clicked.connect(self._open_history)
         retry_button = QPushButton("重试满箱处理")
@@ -171,22 +226,22 @@ class MainWindow(QWidget):
         QShortcut(QKeySequence("Escape"), self, activated=self.close)
 
     def _process_scan(self) -> None:
+        previous_state = self.service.state
         barcode = self.scan_input.text()
         self.scan_input.clear()
         outcome = self.service.process_barcode(barcode)
         self._show_status(outcome.result, outcome.message)
-        if not outcome.accepted:
-            QApplication.beep()
-        self._refresh_state(outcome.state)
+        self._handle_outcome_error(outcome)
+        self._refresh_outcome_state(previous_state, outcome)
         self._refresh_recent()
         self.scan_input.setFocus()
 
     def _retry_finalize(self) -> None:
+        previous_state = self.service.state
         outcome = self.service.retry_current_box()
         self._show_status(outcome.result, outcome.message)
-        if not outcome.printed:
-            QApplication.beep()
-        self._refresh_state(outcome.state)
+        self._handle_outcome_error(outcome)
+        self._refresh_outcome_state(previous_state, outcome)
         self._refresh_recent()
 
     def _show_status(self, result: str, message: str) -> None:
@@ -206,6 +261,9 @@ class MainWindow(QWidget):
         self.required_value.setText(str(state.required_count))
         self.scanned_value.setText(str(state.scanned_count))
         self.remaining_value.setText(str(state.remaining_count))
+        self.progress_big_label.setText(
+            f"{state.scanned_count}/{state.required_count}"
+        )
         if state.status != "SCANNING":
             self._show_status(state.status, "当前箱需要处理")
 
@@ -225,6 +283,36 @@ class MainWindow(QWidget):
                     row_index, column, QTableWidgetItem(str(value))
                 )
 
+    def _refresh_outcome_state(self, previous_state: BoxState, outcome: object) -> None:
+        switched_to_new_box = (
+            outcome.box_completed
+            and outcome.state.offline_order_no
+            != previous_state.offline_order_no
+        )
+        if not switched_to_new_box:
+            self._refresh_state(outcome.state)
+            return
+
+        completed_state = replace(
+            previous_state,
+            scanned_count=previous_state.required_count,
+            remaining_count=0,
+        )
+        self._refresh_state(completed_state)
+        next_order_no = outcome.state.offline_order_no
+        QTimer.singleShot(
+            800,
+            lambda: self._refresh_new_box_if_still_empty(next_order_no),
+        )
+
+    def _refresh_new_box_if_still_empty(self, order_no: str) -> None:
+        current = self.service.state
+        if (
+            current.offline_order_no == order_no
+            and current.scanned_count == 0
+        ):
+            self._refresh_state(current)
+
     def _open_history(self) -> None:
         HistoryDialog(self.service, self).exec()
         self.scan_input.setFocus()
@@ -232,6 +320,41 @@ class MainWindow(QWidget):
     def _ensure_scan_focus(self) -> None:
         if QApplication.activeModalWidget() is None:
             self.scan_input.setFocus()
+
+    def _handle_outcome_error(self, outcome: object) -> None:
+        error_results = {
+            "重复",
+            "物料不一致",
+            "格式错误",
+            "未配置物料",
+            "PDF生成失败",
+            "打印失败",
+            "待处理",
+            "未满箱",
+        }
+        if not outcome.accepted or outcome.result in error_results:
+            QApplication.beep()
+            self.show_error_popup(outcome.result, outcome.message)
+
+    def show_error_popup(self, title: str, message: str) -> None:
+        """显示非阻塞错误窗口；新错误会更新内容并重置3秒计时。"""
+
+        if self.error_dialog is None:
+            self.error_dialog = ErrorPopup(self)
+        self.error_dialog.set_error(title, message)
+        self.error_dialog.show()
+        self.error_dialog.raise_()
+        self.error_close_timer.start()
+        QTimer.singleShot(0, self._restore_scan_focus)
+
+    def _close_error_popup(self) -> None:
+        if self.error_dialog is not None:
+            self.error_dialog.close()
+        self._restore_scan_focus()
+
+    def _restore_scan_focus(self) -> None:
+        self.activateWindow()
+        self.scan_input.setFocus()
 
 
 class HistoryDialog(QDialog):
