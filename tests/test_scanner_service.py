@@ -13,14 +13,15 @@ from ehx_guard.scanner_service import ScannerService
 
 
 MATERIAL_A = Material(
-    "5664620-CLBK06", "主驾座椅背板总成 极夜黑", "566462001FA2"
+    "5664620-CLBK06", "主驾座椅背板总成 极夜黑", "566462001FA2", 2
 )
 MATERIAL_B = Material(
-    "5664618-CLBK06", "副驾座椅背板总成 极夜黑", "566461801FA2"
+    "5664618-CLBK06", "副驾座椅背板总成 极夜黑", "566461801FA2", 5
 )
 BARCODE_A1 = "5664620-CLBK0620260616001"
 BARCODE_A2 = "5664620-CLBK0620260616002"
 BARCODE_B1 = "5664618-CLBK0620260616001"
+BARCODE_B2 = "5664618-CLBK0620260616002"
 
 
 class FakePdfGenerator:
@@ -90,10 +91,29 @@ class ScannerServiceTest(unittest.TestCase):
         self,
         *,
         box_count: int = 2,
+        material_a_count: int | None = None,
+        material_b_count: int | None = None,
         pdf=None,
         printer=None,
         mii=None,
     ) -> ScannerService:
+        self.database.upsert_materials(
+            [
+                Material(
+                    MATERIAL_A.material_code,
+                    MATERIAL_A.material_name,
+                    MATERIAL_A.customer_material_code,
+                    material_a_count or box_count,
+                ),
+                Material(
+                    MATERIAL_B.material_code,
+                    MATERIAL_B.material_name,
+                    MATERIAL_B.customer_material_code,
+                    material_b_count or box_count,
+                ),
+            ]
+        )
+        self.materials.reload()
         return ScannerService(
             self._config(box_count),
             self.database,
@@ -180,7 +200,9 @@ class ScannerServiceTest(unittest.TestCase):
             self._config(3),
             self.database,
             MaterialRepository(
-                self.database, self.root / "not-needed.xlsx"
+                self.database,
+                self.root / "not-needed.xlsx",
+                default_box_scan_count=3,
             ),
             pdf_generator=FakePdfGenerator(),
             printer=FakePrinter(),
@@ -216,6 +238,17 @@ class ScannerServiceTest(unittest.TestCase):
     def test_macos_debug_generates_pdf_only_and_starts_next_box(self) -> None:
         pdf = FakePdfGenerator()
         first_order = None
+        self.database.upsert_materials(
+            [
+                Material(
+                    MATERIAL_A.material_code,
+                    MATERIAL_A.material_name,
+                    MATERIAL_A.customer_material_code,
+                    1,
+                )
+            ]
+        )
+        self.materials.reload()
         with patch("ehx_guard.scanner_service.platform.system", return_value="Darwin"):
             service = ScannerService(
                 self._config(1),
@@ -234,6 +267,43 @@ class ScannerServiceTest(unittest.TestCase):
         self.assertEqual(0, order["printed"])
         self.assertTrue(Path(order["pdf_path"]).is_file())
         self.assertNotEqual(first_order, service.state.offline_order_no)
+
+    def test_different_materials_use_different_box_counts(self) -> None:
+        service = self._service(
+            box_count=99,
+            material_a_count=2,
+            material_b_count=5,
+        )
+        first_order = service.state.offline_order_no
+        first = service.process_barcode(BARCODE_A1)
+        self.assertEqual(2, first.state.required_count)
+        service.process_barcode(BARCODE_A2)
+        self.assertNotEqual(first_order, service.state.offline_order_no)
+
+        second_material = service.process_barcode(BARCODE_B1)
+        self.assertEqual(5, second_material.state.required_count)
+
+    def test_required_count_is_frozen_on_historical_order(self) -> None:
+        service = self._service(box_count=2, material_a_count=2)
+        order_no = service.state.offline_order_no
+        service.process_barcode(BARCODE_A1)
+        self.assertEqual(
+            2, self.database.get_order(order_no)["required_count"]
+        )
+
+        self.database.upsert_materials(
+            [
+                Material(
+                    MATERIAL_A.material_code,
+                    MATERIAL_A.material_name,
+                    MATERIAL_A.customer_material_code,
+                    44,
+                )
+            ]
+        )
+        self.assertEqual(
+            2, self.database.get_order(order_no)["required_count"]
+        )
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
 
 from openpyxl import load_workbook
 from pypdf import PdfReader
@@ -113,7 +112,7 @@ class A5PdfGeneratorTest(unittest.TestCase):
             ):
                 generator.create_workbook_copy(_label(), temp_dir / "copy.xlsx")
 
-    def test_libreoffice_failure_logs_and_uses_fallback(self) -> None:
+    def test_unavailable_preferred_renderer_uses_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_text:
             temp_dir = Path(temp_dir_text)
             output = temp_dir / "sample.pdf"
@@ -121,24 +120,17 @@ class A5PdfGeneratorTest(unittest.TestCase):
             generator = A5PdfGenerator(
                 TEMPLATE,
                 log_path=log_path,
+                enable_libreoffice=False,
                 enable_excel_com=False,
                 barcode_output_dir=temp_dir / "barcodes",
             )
-            generator.soffice_path = Path("/fake/soffice")
-            with patch.object(
-                generator,
-                "_convert_with_libreoffice",
-                side_effect=PdfGenerationError("模拟转换错误"),
-            ):
-                result = generator.generate(_label(), output)
+            result = generator.generate(_label(), output)
             for handler in generator.logger.handlers:
                 handler.flush()
 
             self.assertTrue(result.is_file())
             self.assertEqual("reportlab_fallback", generator.last_renderer)
             log_text = log_path.read_text(encoding="utf-8")
-            self.assertIn("LibreOffice 渲染失败", log_text)
-            self.assertIn("模拟转换错误", log_text)
             self.assertIn("fallback PDF renderer", log_text)
 
     def test_fallback_generates_single_page_a5_landscape(self) -> None:

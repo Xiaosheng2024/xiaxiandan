@@ -12,7 +12,7 @@ from PySide6.QtTest import QTest
 
 from ehx_guard.config import RuntimeConfig
 from ehx_guard.database import Database
-from ehx_guard.gui import MainWindow
+from ehx_guard.gui import MainWindow, MaterialDialog
 from ehx_guard.materials import Material, MaterialRepository
 from ehx_guard.printing import PrintResult
 from ehx_guard.scanner_service import ScannerService
@@ -53,18 +53,22 @@ class GuiSmokeTest(unittest.TestCase):
     def test_window_opens_and_accepts_scanner_enter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_text:
             temp_dir = Path(temp_dir_text)
-            database = Database(temp_dir / "gui.db")
+            database = Database(
+                temp_dir / "gui.db", default_box_scan_count=6
+            )
             database.upsert_materials(
                 [
                     Material(
                         "5664620-CLBK06",
                         "主驾座椅背板总成 极夜黑",
                         "566462001FA2",
+                        6,
                     ),
                     Material(
                         "5664618-CLBK06",
                         "副驾座椅背板总成 极夜黑",
                         "566461801FA2",
+                        6,
                     ),
                 ]
             )
@@ -77,7 +81,11 @@ class GuiSmokeTest(unittest.TestCase):
             service = ScannerService(
                 config,
                 database,
-                MaterialRepository(database, temp_dir / "unused.xlsx"),
+                MaterialRepository(
+                    database,
+                    temp_dir / "unused.xlsx",
+                    default_box_scan_count=6,
+                ),
                 pdf_generator=_UnusedDependency(),
                 printer=_UnusedDependency(),
                 mii_client=_NoNetworkMii(),
@@ -85,7 +93,7 @@ class GuiSmokeTest(unittest.TestCase):
             window = MainWindow(service)
             window.show()
             self.application.processEvents()
-            self.assertEqual("0/6", window.progress_big_label.text())
+            self.assertEqual("0/--", window.progress_big_label.text())
 
             window.scan_input.setText("5664620-CLBK0620260616001")
             window.scan_input.returnPressed.emit()
@@ -95,6 +103,15 @@ class GuiSmokeTest(unittest.TestCase):
             self.assertEqual(1, service.state.scanned_count)
             self.assertEqual("1/6", window.progress_big_label.text())
             self.assertGreaterEqual(window.recent_table.rowCount(), 1)
+
+            material_dialog = MaterialDialog(service, window)
+            self.assertEqual(4, material_dialog.table.columnCount())
+            self.assertEqual(
+                "每箱数量",
+                material_dialog.table.horizontalHeaderItem(3).text(),
+            )
+            self.assertEqual("6", material_dialog.table.item(0, 3).text())
+            material_dialog.close()
 
             # 重复、混料、未配置均弹窗，且失败扫码不增加进度。
             window.scan_input.setText("5664620-CLBK0620260616001")
@@ -135,18 +152,21 @@ class GuiSmokeTest(unittest.TestCase):
     def test_full_box_briefly_shows_complete_then_new_box(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_text:
             temp_dir = Path(temp_dir_text)
-            database = Database(temp_dir / "full.db")
+            database = Database(
+                temp_dir / "full.db", default_box_scan_count=44
+            )
             database.upsert_materials(
                 [
                     Material(
                         "5664620-CLBK06",
                         "主驾座椅背板总成 极夜黑",
                         "566462001FA2",
+                        1,
                     )
                 ]
             )
             config = RuntimeConfig(
-                box_scan_count=1,
+                box_scan_count=44,
                 database_path=str(temp_dir / "full.db"),
                 output_pdf_dir=str(temp_dir / "pdf"),
                 material_excel_path=str(temp_dir / "unused.xlsx"),
@@ -154,7 +174,11 @@ class GuiSmokeTest(unittest.TestCase):
             service = ScannerService(
                 config,
                 database,
-                MaterialRepository(database, temp_dir / "unused.xlsx"),
+                MaterialRepository(
+                    database,
+                    temp_dir / "unused.xlsx",
+                    default_box_scan_count=44,
+                ),
                 pdf_generator=_FakePdf(),
                 printer=_FakePrinter(),
                 mii_client=_NoNetworkMii(),
@@ -168,7 +192,7 @@ class GuiSmokeTest(unittest.TestCase):
             self.assertEqual("1/1", window.progress_big_label.text())
             QTest.qWait(900)
             self.application.processEvents()
-            self.assertEqual("0/1", window.progress_big_label.text())
+            self.assertEqual("0/--", window.progress_big_label.text())
 
             window.focus_timer.stop()
             window.close()

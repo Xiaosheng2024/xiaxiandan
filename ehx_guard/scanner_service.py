@@ -62,7 +62,8 @@ class ScannerService:
         self.config = config
         self.database = database
         self.materials = materials
-        self.materials.load()
+        # 每次程序启动同步一次 Excel；运行中可通过物料窗口手动重新导入。
+        self.materials.load(refresh_from_excel=True)
         self.logger = logger or logging.getLogger("ehx_guard.scanner")
         self.computer_name = socket.gethostname()
         system_name = platform.system()
@@ -109,7 +110,7 @@ class ScannerService:
     def state(self) -> BoxState:
         self._order = self.database.get_order(self._order["offline_order_no"])
         scanned = self.database.accepted_count(self._order["offline_order_no"])
-        required = int(self._order["qty"])
+        required = int(self._order["required_count"])
         return BoxState(
             offline_order_no=self._order["offline_order_no"],
             box_no=self._order["box_no"],
@@ -175,11 +176,15 @@ class ScannerService:
             )
 
         if not current.material_code:
+            required_count = (
+                material.box_scan_count or self.config.box_scan_count
+            )
             self.database.set_order_material(
                 current.offline_order_no,
                 material.material_code,
                 material.material_name,
                 material.customer_material_code,
+                required_count,
             )
 
         try:
@@ -270,6 +275,14 @@ class ScannerService:
 
     def _finalize_current_box(self, triggering_barcode: str) -> ScanOutcome:
         current = self.state
+        if not current.material_code or current.required_count <= 0:
+            return ScanOutcome(
+                False,
+                "未满箱",
+                "请先扫描第一件以识别物料和每箱数量",
+                triggering_barcode,
+                current,
+            )
         if current.scanned_count != current.required_count:
             return ScanOutcome(
                 False,
@@ -381,5 +394,5 @@ class ScannerService:
     def _create_next_order(self) -> dict[str, Any]:
         stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
         return self.database.create_order(
-            f"EHX{stamp}", f"BOX{stamp}", self.config.box_scan_count
+            f"EHX{stamp}", f"BOX{stamp}", 0
         )

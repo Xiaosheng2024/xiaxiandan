@@ -21,13 +21,16 @@ class MacIntegrationTest(unittest.TestCase):
     def test_full_box_generates_pdf_images_and_skips_print(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_text:
             root = Path(temp_dir_text)
-            database = Database(root / "data/ehx.db")
+            database = Database(
+                root / "data/ehx.db", default_box_scan_count=1
+            )
             database.upsert_materials(
                 [
                     Material(
                         "5664620-CLBK06",
                         "主驾座椅背板总成 极夜黑",
                         "566462001FA2",
+                        1,
                     )
                 ]
             )
@@ -47,7 +50,11 @@ class MacIntegrationTest(unittest.TestCase):
             service = ScannerService(
                 config,
                 database,
-                MaterialRepository(database, root / "unused.xlsx"),
+                MaterialRepository(
+                    database,
+                    root / "unused.xlsx",
+                    default_box_scan_count=1,
+                ),
             )
             order_no = service.state.offline_order_no
             outcome = service.process_barcode(

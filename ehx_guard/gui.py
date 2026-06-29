@@ -145,10 +145,13 @@ class MainWindow(QWidget):
         )
         title_row.addWidget(self.progress_big_label)
         title_row.addStretch(1)
+        materials_button = QPushButton("物料查看 / 重新导入")
+        materials_button.clicked.connect(self._open_materials)
         history_button = QPushButton("历史查询 / 补打")
         history_button.clicked.connect(self._open_history)
         retry_button = QPushButton("重试满箱处理")
         retry_button.clicked.connect(self._retry_finalize)
+        title_row.addWidget(materials_button)
         title_row.addWidget(history_button)
         title_row.addWidget(retry_button)
         root.addLayout(title_row)
@@ -258,11 +261,17 @@ class MainWindow(QWidget):
             material += f"\n{state.material_name}"
         self.material_value.setText(material)
         self.order_value.setText(state.offline_order_no)
-        self.required_value.setText(str(state.required_count))
+        required_text = (
+            str(state.required_count) if state.required_count > 0 else "--"
+        )
+        remaining_text = (
+            str(state.remaining_count) if state.required_count > 0 else "--"
+        )
+        self.required_value.setText(required_text)
         self.scanned_value.setText(str(state.scanned_count))
-        self.remaining_value.setText(str(state.remaining_count))
+        self.remaining_value.setText(remaining_text)
         self.progress_big_label.setText(
-            f"{state.scanned_count}/{state.required_count}"
+            f"{state.scanned_count}/{required_text}"
         )
         if state.status != "SCANNING":
             self._show_status(state.status, "当前箱需要处理")
@@ -293,9 +302,19 @@ class MainWindow(QWidget):
             self._refresh_state(outcome.state)
             return
 
+        completed_order = self.service.database.get_order(
+            previous_state.offline_order_no
+        )
+        completed_required = int(completed_order["required_count"])
         completed_state = replace(
             previous_state,
-            scanned_count=previous_state.required_count,
+            material_code=completed_order["material_code"],
+            material_name=completed_order["material_name"],
+            customer_material_code=completed_order[
+                "customer_material_code"
+            ],
+            required_count=completed_required,
+            scanned_count=completed_required,
             remaining_count=0,
         )
         self._refresh_state(completed_state)
@@ -315,6 +334,10 @@ class MainWindow(QWidget):
 
     def _open_history(self) -> None:
         HistoryDialog(self.service, self).exec()
+        self.scan_input.setFocus()
+
+    def _open_materials(self) -> None:
+        MaterialDialog(self.service, self).exec()
         self.scan_input.setFocus()
 
     def _ensure_scan_focus(self) -> None:
@@ -469,6 +492,76 @@ class HistoryDialog(QDialog):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path.resolve())))
 
 
+class MaterialDialog(QDialog):
+    def __init__(self, service: ScannerService, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.service = service
+        self.setWindowTitle("物料配置查看")
+        self.resize(1000, 620)
+        root = QVBoxLayout(self)
+
+        actions = QHBoxLayout()
+        description = QLabel(
+            "物料数据来源：EHX物料号匹配.xlsx（D列为空时使用全局默认数量）"
+        )
+        description.setFont(QFont("Microsoft YaHei", 14))
+        import_button = QPushButton("重新导入物料")
+        import_button.clicked.connect(self._import_materials)
+        actions.addWidget(description)
+        actions.addStretch()
+        actions.addWidget(import_button)
+        root.addLayout(actions)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(
+            ["物料条码前缀", "物料名称", "客户物料号/SAP物料号", "每箱数量"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self.table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Stretch
+        )
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        root.addWidget(self.table)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        materials = self.service.materials.reload()
+        self.table.setRowCount(len(materials))
+        for row_index, material in enumerate(materials):
+            values = [
+                material.material_code,
+                material.material_name,
+                material.customer_material_code,
+                material.box_scan_count,
+            ]
+            for column, value in enumerate(values):
+                self.table.setItem(
+                    row_index, column, QTableWidgetItem(str(value))
+                )
+
+    def _import_materials(self) -> None:
+        try:
+            result = self.service.materials.import_excel()
+            self._refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "物料导入失败", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "物料导入完成",
+            (
+                f"新增：{result.added} 条\n"
+                f"更新：{result.updated} 条\n"
+                f"禁用：{result.disabled} 条"
+            ),
+        )
+
+
 def build_service(config_path: str | Path = "config.json") -> ScannerService:
     config_file = Path(config_path).expanduser().resolve()
     base_dir = config_file.parent
@@ -486,6 +579,13 @@ def build_service(config_path: str | Path = "config.json") -> ScannerService:
         material_excel_path=resolve_config_path(config.material_excel_path),
         barcode_output_dir=resolve_config_path(config.barcode_output_dir),
     )
-    database = Database(config.database_path)
-    materials = MaterialRepository(database, config.material_excel_path)
+    database = Database(
+        config.database_path,
+        default_box_scan_count=config.box_scan_count,
+    )
+    materials = MaterialRepository(
+        database,
+        config.material_excel_path,
+        default_box_scan_count=config.box_scan_count,
+    )
     return ScannerService(config, database, materials)

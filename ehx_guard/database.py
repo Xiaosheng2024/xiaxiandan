@@ -11,8 +11,13 @@ from typing import Any, Iterable, Iterator, Mapping
 
 
 class Database:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self, path: str | Path, *, default_box_scan_count: int = 6
+    ) -> None:
+        if int(default_box_scan_count) <= 0:
+            raise ValueError("default_box_scan_count 必须大于 0")
         self.path = Path(path).expanduser().resolve()
+        self.default_box_scan_count = int(default_box_scan_count)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
 
@@ -41,6 +46,7 @@ class Database:
                     material_code TEXT NOT NULL UNIQUE,
                     material_name TEXT NOT NULL,
                     customer_material_code TEXT NOT NULL,
+                    box_scan_count INTEGER NOT NULL DEFAULT 6,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -54,6 +60,7 @@ class Database:
                     material_name TEXT NOT NULL DEFAULT '',
                     customer_material_code TEXT NOT NULL DEFAULT '',
                     qty INTEGER NOT NULL,
+                    required_count INTEGER NOT NULL,
                     status TEXT NOT NULL,
                     pdf_path TEXT NOT NULL DEFAULT '',
                     printed INTEGER NOT NULL DEFAULT 0,
@@ -99,43 +106,145 @@ class Database:
                     ON offline_orders(created_at);
                 """
             )
+            self._migrate_schema(connection)
+
+    def _migrate_schema(self, connection: sqlite3.Connection) -> None:
+        material_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(material_mapping)"
+            ).fetchall()
+        }
+        if "box_scan_count" not in material_columns:
+            connection.execute(
+                """
+                ALTER TABLE material_mapping
+                ADD COLUMN box_scan_count INTEGER NOT NULL DEFAULT 6
+                """
+            )
+            connection.execute(
+                "UPDATE material_mapping SET box_scan_count = ?",
+                (self.default_box_scan_count,),
+            )
+
+        order_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(offline_orders)"
+            ).fetchall()
+        }
+        if "required_count" not in order_columns:
+            connection.execute(
+                """
+                ALTER TABLE offline_orders
+                ADD COLUMN required_count INTEGER NOT NULL DEFAULT 6
+                """
+            )
+            connection.execute(
+                "UPDATE offline_orders SET required_count = qty"
+            )
 
     def upsert_materials(self, materials: Iterable[Any]) -> int:
+        result = self.sync_materials(materials, disable_missing=False)
+        return result["added"] + result["updated"]
+
+    def sync_materials(
+        self,
+        materials: Iterable[Any],
+        *,
+        disable_missing: bool = True,
+    ) -> dict[str, int]:
         now = _now()
         rows = []
         for item in materials:
             data = asdict(item) if is_dataclass(item) else dict(item)
+            box_scan_count = data.get("box_scan_count")
+            if box_scan_count is None:
+                box_scan_count = self.default_box_scan_count
+            box_scan_count = int(box_scan_count)
+            if box_scan_count <= 0:
+                raise ValueError("物料每箱数量必须大于 0")
             rows.append(
                 (
                     str(data["material_code"]).strip(),
                     str(data["material_name"]).strip(),
                     str(data["customer_material_code"]).strip(),
+                    box_scan_count,
                     now,
                     now,
                 )
             )
+        incoming_codes = {row[0] for row in rows}
         with self.connect() as connection:
+            existing_rows = connection.execute(
+                """
+                SELECT material_code, material_name, customer_material_code,
+                       box_scan_count, enabled
+                FROM material_mapping
+                """
+            ).fetchall()
+            existing = {row["material_code"]: dict(row) for row in existing_rows}
+            added = sum(1 for row in rows if row[0] not in existing)
+            updated = sum(
+                1
+                for row in rows
+                if row[0] in existing
+                and (
+                    existing[row[0]]["material_name"] != row[1]
+                    or existing[row[0]]["customer_material_code"] != row[2]
+                    or int(existing[row[0]]["box_scan_count"]) != row[3]
+                    or int(existing[row[0]]["enabled"]) != 1
+                )
+            )
+            disabled = sum(
+                1
+                for code, data in existing.items()
+                if int(data["enabled"]) == 1 and code not in incoming_codes
+            )
             connection.executemany(
                 """
                 INSERT INTO material_mapping (
                     material_code, material_name, customer_material_code,
-                    enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, 1, ?, ?)
+                    box_scan_count, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(material_code) DO UPDATE SET
                     material_name = excluded.material_name,
                     customer_material_code = excluded.customer_material_code,
+                    box_scan_count = excluded.box_scan_count,
                     enabled = 1,
                     updated_at = excluded.updated_at
                 """,
                 rows,
             )
-        return len(rows)
+            if disable_missing:
+                if incoming_codes:
+                    placeholders = ",".join("?" for _ in incoming_codes)
+                    connection.execute(
+                        f"""
+                        UPDATE material_mapping
+                        SET enabled = 0, updated_at = ?
+                        WHERE material_code NOT IN ({placeholders})
+                          AND enabled = 1
+                        """,
+                        (now, *sorted(incoming_codes)),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE material_mapping
+                        SET enabled = 0, updated_at = ?
+                        WHERE enabled = 1
+                        """,
+                        (now,),
+                    )
+        return {"added": added, "updated": updated, "disabled": disabled}
 
     def get_enabled_materials(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT material_code, material_name, customer_material_code
+                SELECT material_code, material_name, customer_material_code,
+                       box_scan_count
                 FROM material_mapping
                 WHERE enabled = 1
                 ORDER BY length(material_code) DESC, material_code
@@ -151,10 +260,18 @@ class Database:
             connection.execute(
                 """
                 INSERT INTO offline_orders (
-                    offline_order_no, box_no, qty, status, created_at, updated_at
-                ) VALUES (?, ?, ?, 'SCANNING', ?, ?)
+                    offline_order_no, box_no, qty, required_count,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'SCANNING', ?, ?)
                 """,
-                (offline_order_no, box_no, target_qty, now, now),
+                (
+                    offline_order_no,
+                    box_no,
+                    target_qty,
+                    target_qty,
+                    now,
+                    now,
+                ),
             )
         return self.get_order(offline_order_no)
 
@@ -189,6 +306,7 @@ class Database:
         material_code: str,
         material_name: str,
         customer_material_code: str,
+        required_count: int,
     ) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -197,6 +315,8 @@ class Database:
                     material_code = ?,
                     material_name = ?,
                     customer_material_code = ?,
+                    qty = ?,
+                    required_count = ?,
                     updated_at = ?
                 WHERE offline_order_no = ?
                 """,
@@ -204,6 +324,8 @@ class Database:
                     material_code,
                     material_name,
                     customer_material_code,
+                    required_count,
+                    required_count,
                     _now(),
                     offline_order_no,
                 ),
@@ -374,7 +496,8 @@ class Database:
                     o.status AS order_status,
                     o.pdf_path,
                     o.printed_at,
-                    o.reprint_count
+                    o.reprint_count,
+                    o.required_count
                 FROM scan_records r
                 JOIN offline_orders o
                   ON o.offline_order_no = r.offline_order_no
