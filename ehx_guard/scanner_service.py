@@ -1,0 +1,346 @@
+"""扫码防错、满箱、PDF 和打印业务流程。"""
+
+from __future__ import annotations
+
+import logging
+import socket
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .config import RuntimeConfig
+from .database import Database
+from .materials import Material, MaterialRepository
+from .mii_client import MiiClient
+from .pdf_generator import A5PdfGenerator, OfflineOrderLabel
+from .printing import PrintResult, SumatraPdfPrinter
+
+
+@dataclass(frozen=True)
+class BoxState:
+    offline_order_no: str
+    box_no: str
+    material_code: str
+    material_name: str
+    customer_material_code: str
+    required_count: int
+    scanned_count: int
+    remaining_count: int
+    status: str
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    accepted: bool
+    result: str
+    message: str
+    barcode: str
+    state: BoxState
+    box_completed: bool = False
+    printed: bool = False
+
+
+class ScannerService:
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        database: Database,
+        materials: MaterialRepository,
+        *,
+        pdf_generator: A5PdfGenerator | Any | None = None,
+        printer: SumatraPdfPrinter | Any | None = None,
+        mii_client: MiiClient | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self.config = config
+        self.database = database
+        self.materials = materials
+        self.materials.load()
+        self.logger = logger or logging.getLogger("ehx_guard.scanner")
+        self.computer_name = socket.gethostname()
+        self.pdf_generator = pdf_generator or A5PdfGenerator(
+            config.template_path,
+            soffice_path=config.libreoffice_path or None,
+            enable_office_pdf_on_mac=config.enable_office_pdf_on_mac,
+        )
+        self.printer = printer or SumatraPdfPrinter(
+            sumatra_path=config.sumatra_path or None,
+            printer_name=config.printer_name,
+            logger=getattr(self.pdf_generator, "logger", self.logger),
+        )
+        self.mii_client = mii_client or MiiClient(
+            enabled=config.mii_enabled,
+            base_url=config.mii_base_url,
+            token=config.mii_token,
+            logger=self.logger,
+        )
+        self._order = self.database.get_recoverable_order()
+        if self._order is None:
+            self._order = self._create_next_order()
+
+    @property
+    def state(self) -> BoxState:
+        self._order = self.database.get_order(self._order["offline_order_no"])
+        scanned = self.database.accepted_count(self._order["offline_order_no"])
+        required = int(self._order["qty"])
+        return BoxState(
+            offline_order_no=self._order["offline_order_no"],
+            box_no=self._order["box_no"],
+            material_code=self._order["material_code"],
+            material_name=self._order["material_name"],
+            customer_material_code=self._order["customer_material_code"],
+            required_count=required,
+            scanned_count=scanned,
+            remaining_count=max(0, required - scanned),
+            status=self._order["status"],
+        )
+
+    def process_barcode(self, raw_barcode: str) -> ScanOutcome:
+        barcode = (raw_barcode or "").strip()
+        current = self.state
+        if current.status != "SCANNING":
+            return ScanOutcome(
+                False,
+                "待处理",
+                "当前箱已满或存在生成/打印失败，请先重试处理",
+                barcode,
+                current,
+            )
+
+        next_index = current.scanned_count + 1
+        if not barcode:
+            return self._reject("", next_index, "格式错误", "条码不能为空")
+
+        material = self.materials.identify(barcode)
+        if material is None:
+            return self._reject(
+                barcode, next_index, "未配置物料", "条码前缀不在物料配置表中"
+            )
+
+        valid, format_message = self.materials.validate_full_barcode(
+            barcode, material
+        )
+        if not valid:
+            return self._reject(
+                barcode,
+                next_index,
+                "格式错误",
+                format_message,
+                material=material,
+            )
+
+        if self.database.accepted_barcode_exists(barcode):
+            return self._reject(
+                barcode,
+                next_index,
+                "重复",
+                "该完整条码已经成功扫描",
+                material=material,
+            )
+
+        if current.material_code and material.material_code != current.material_code:
+            return self._reject(
+                barcode,
+                next_index,
+                "物料不一致",
+                f"当前箱物料为 {current.material_code}",
+                material=material,
+            )
+
+        if not current.material_code:
+            self.database.set_order_material(
+                current.offline_order_no,
+                material.material_code,
+                material.material_name,
+                material.customer_material_code,
+            )
+
+        try:
+            self._record(
+                barcode=barcode,
+                scan_index=next_index,
+                result="成功",
+                message="扫码成功",
+                material=material,
+            )
+        except sqlite3.IntegrityError:
+            return self._reject(
+                barcode,
+                next_index,
+                "重复",
+                "该完整条码已经成功扫描",
+                material=material,
+            )
+
+        updated = self.state
+        if updated.scanned_count < updated.required_count:
+            return ScanOutcome(
+                True, "成功", "扫码成功", barcode, updated
+            )
+        return self._finalize_current_box(barcode)
+
+    def retry_current_box(self) -> ScanOutcome:
+        return self._finalize_current_box("")
+
+    def reprint(self, offline_order_no: str) -> PrintResult:
+        order = self.database.get_order(offline_order_no)
+        pdf_path = Path(order["pdf_path"])
+        result = self.printer.print_pdf(pdf_path)
+        if result.success:
+            self.database.mark_printed(offline_order_no, reprint=True)
+        else:
+            self.database.update_order_status(
+                offline_order_no,
+                "PRINT_FAILED",
+                print_error=result.message,
+            )
+        return result
+
+    def _reject(
+        self,
+        barcode: str,
+        scan_index: int,
+        result: str,
+        message: str,
+        *,
+        material: Material | None = None,
+    ) -> ScanOutcome:
+        self._record(
+            barcode=barcode,
+            scan_index=scan_index,
+            result=result,
+            message=message,
+            material=material,
+        )
+        return ScanOutcome(False, result, message, barcode, self.state)
+
+    def _record(
+        self,
+        *,
+        barcode: str,
+        scan_index: int,
+        result: str,
+        message: str,
+        material: Material | None,
+    ) -> None:
+        current = self.state
+        self.database.record_scan(
+            offline_order_no=current.offline_order_no,
+            box_no=current.box_no,
+            barcode=barcode,
+            scan_index=scan_index,
+            result=result,
+            message=message,
+            material_code=material.material_code if material else "",
+            material_name=material.material_name if material else "",
+            customer_material_code=(
+                material.customer_material_code if material else ""
+            ),
+            computer_name=self.computer_name,
+            line_name=self.config.line_name,
+            station_name=self.config.station_name,
+        )
+
+    def _finalize_current_box(self, triggering_barcode: str) -> ScanOutcome:
+        current = self.state
+        if current.scanned_count != current.required_count:
+            return ScanOutcome(
+                False,
+                "未满箱",
+                f"还需扫描 {current.remaining_count} 件",
+                triggering_barcode,
+                current,
+            )
+
+        order = self.database.get_order(current.offline_order_no)
+        pdf_path = Path(order["pdf_path"]) if order["pdf_path"] else None
+        if pdf_path is None or not pdf_path.is_file():
+            output_dir = Path(self.config.output_pdf_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            pdf_path = output_dir / f"{current.offline_order_no}.pdf"
+            label = OfflineOrderLabel(
+                offline_order_no=current.offline_order_no,
+                material_code=current.material_code,
+                material_name=current.material_name,
+                customer_material_code=current.customer_material_code,
+                quantity=current.required_count,
+                production_time=datetime.now(),
+                offline_location=self.config.station_name,
+                reserved1_sub=self.config.reserved1_sub,
+            )
+            try:
+                self.database.update_order_status(
+                    current.offline_order_no, "PDF_GENERATING"
+                )
+                self.pdf_generator.generate(label, pdf_path)
+                self.database.update_order_status(
+                    current.offline_order_no,
+                    "READY_TO_PRINT",
+                    pdf_path=str(pdf_path.resolve()),
+                    print_error="",
+                )
+            except Exception as exc:
+                message = f"PDF生成失败：{exc}"
+                self.logger.exception(message)
+                self.database.update_order_status(
+                    current.offline_order_no,
+                    "PDF_FAILED",
+                    print_error=message,
+                )
+                return ScanOutcome(
+                    True,
+                    "PDF生成失败",
+                    message,
+                    triggering_barcode,
+                    self.state,
+                    box_completed=True,
+                )
+
+        print_result = self.printer.print_pdf(pdf_path)
+        if not print_result.success:
+            self.database.update_order_status(
+                current.offline_order_no,
+                "PRINT_FAILED",
+                pdf_path=str(pdf_path.resolve()),
+                print_error=print_result.message,
+            )
+            return ScanOutcome(
+                True,
+                "打印失败",
+                f"打印失败，PDF和数据已保留：{print_result.message}",
+                triggering_barcode,
+                self.state,
+                box_completed=True,
+            )
+
+        self.database.mark_printed(current.offline_order_no)
+        completed_order = self.database.get_order(current.offline_order_no)
+        self.mii_client.upload_offline_order(
+            {
+                **completed_order,
+                "barcodes": [
+                    row["barcode"]
+                    for row in self.database.successful_scans(
+                        current.offline_order_no
+                    )
+                ],
+            }
+        )
+        self._order = self._create_next_order()
+        return ScanOutcome(
+            True,
+            "打印完成",
+            "满箱校验通过，PDF已生成并提交打印",
+            triggering_barcode,
+            self.state,
+            box_completed=True,
+            printed=True,
+        )
+
+    def _create_next_order(self) -> dict[str, Any]:
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        return self.database.create_order(
+            f"EHX{stamp}", f"BOX{stamp}", self.config.box_scan_count
+        )
