@@ -33,10 +33,7 @@ class MacIntegrationTest(unittest.TestCase):
             )
             config = RuntimeConfig(
                 box_scan_count=1,
-                template_path=str(
-                    PROJECT_ROOT
-                    / "Wologic/System/报交下线单模板.xlsx"
-                ),
+                template_path=str(PROJECT_ROOT / "报交下线单模板.xlsx"),
                 output_pdf_dir=str(root / "output/pdf"),
                 barcode_output_dir=str(root / "output/barcodes"),
                 database_path=str(root / "data/ehx.db"),

@@ -12,7 +12,11 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from ehx_guard.gui import MainWindow, build_service
 
 
-APP_ROOT = Path(__file__).resolve().parent
+APP_ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+)
 
 
 def _configure_logging() -> None:

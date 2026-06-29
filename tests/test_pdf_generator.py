@@ -19,7 +19,7 @@ from ehx_guard.pdf_generator import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = PROJECT_ROOT / "Wologic/System/报交下线单模板.xlsx"
+TEMPLATE = PROJECT_ROOT / "报交下线单模板.xlsx"
 
 
 def _sha256(path: Path) -> str:

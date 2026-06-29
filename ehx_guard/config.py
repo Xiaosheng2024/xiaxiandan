@@ -12,7 +12,7 @@ class RuntimeConfig:
     printer_name: str = ""
     libreoffice_path: str = ""
     sumatra_path: str = ""
-    template_path: str = "Wologic/System/报交下线单模板.xlsx"
+    template_path: str = "报交下线单模板.xlsx"
     output_pdf_dir: str = "output/pdf"
     database_path: str = "data/ehx_guard.db"
     enable_office_pdf_on_mac: bool = False

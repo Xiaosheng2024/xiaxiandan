@@ -1,0 +1,70 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  package:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Build executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name "EHX下线防错" `
+            --distpath "dist_binary" `
+            --workpath "build/pyinstaller" `
+            --specpath "build" `
+            main.py
+
+      - name: Assemble delivery directory
+        shell: pwsh
+        run: |
+          $package = "dist/EHX下线防错_Windows"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          New-Item -ItemType Directory -Force -Path "$package/data" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$package/logs" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$package/output/pdf" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$package/output/barcodes" | Out-Null
+
+          Copy-Item "dist_binary/EHX下线防错.exe" "$package/EHX下线防错.exe"
+          Copy-Item "config.json" "$package/config.json"
+          Copy-Item "EHX物料号匹配.xlsx" "$package/EHX物料号匹配.xlsx"
+          Copy-Item "报交下线单模板.xlsx" "$package/报交下线单模板.xlsx"
+          Copy-Item "README.md" "$package/README.md"
+          Copy-Item "A5_PDF说明.md" "$package/A5_PDF说明.md"
+          Copy-Item "操作员使用说明.md" "$package/操作员使用说明.md"
+          Copy-Item "管理员部署说明.md" "$package/管理员部署说明.md"
+          Copy-Item "启动说明.txt" "$package/启动说明.txt"
+
+          Compress-Archive `
+            -Path $package `
+            -DestinationPath "dist/EHX下线防错_Windows.zip" `
+            -Force
+
+      - name: Upload delivery package
+        uses: actions/upload-artifact@v4
+        with:
+          name: EHX下线防错_Windows
+          path: dist/EHX下线防错_Windows.zip
+          if-no-files-found: error
