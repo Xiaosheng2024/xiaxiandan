@@ -20,7 +20,6 @@ from .printing import (
     DebugNoPrintPrinter,
     ExcelComPrinter,
     PrintResult,
-    SumatraPdfPrinter,
 )
 
 
@@ -56,7 +55,7 @@ class ScannerService:
         materials: MaterialRepository,
         *,
         pdf_generator: A5PdfGenerator | Any | None = None,
-        printer: SumatraPdfPrinter | Any | None = None,
+        printer: ExcelComPrinter | Any | None = None,
         mii_client: MiiClient | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -75,9 +74,7 @@ class ScannerService:
             pdf_renderer = "reportlab"
         self.pdf_generator = pdf_generator or A5PdfGenerator(
             config.template_path,
-            soffice_path=config.libreoffice_path or None,
             enable_libreoffice=False,
-            enable_office_pdf_on_mac=config.enable_office_pdf_on_mac,
             barcode_mode=config.barcode_mode,
             barcode_show_text=config.barcode_show_text,
             barcode_output_dir=config.barcode_output_dir,
@@ -89,18 +86,13 @@ class ScannerService:
             self.printer = DebugNoPrintPrinter(
                 logger=getattr(self.pdf_generator, "logger", self.logger)
             )
-        elif (
-            system_name == "Windows"
-            and config.windows_print_method == "excel_com"
-        ):
+        elif system_name == "Windows":
             self.printer = ExcelComPrinter(
                 printer_name=config.printer_name,
                 logger=getattr(self.pdf_generator, "logger", self.logger),
             )
         else:
-            self.printer = SumatraPdfPrinter(
-                sumatra_path=config.sumatra_path or None,
-                printer_name=config.printer_name,
+            self.printer = DebugNoPrintPrinter(
                 logger=getattr(self.pdf_generator, "logger", self.logger),
             )
         self.mii_client = mii_client or MiiClient(

@@ -20,8 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ehx_guard.config import load_config
-from ehx_guard.pdf_generator import find_soffice, is_excel_com_available
-from ehx_guard.printing import find_sumatra
+from ehx_guard.pdf_generator import is_excel_com_available
 
 
 def _module_available(name: str) -> bool:
@@ -31,93 +30,6 @@ def _module_available(name: str) -> bool:
 def _resolve_project_path(value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else PROJECT_ROOT / path
-
-
-def _check_libreoffice(configured_path: str) -> tuple[bool, str, str]:
-    path = find_soffice(configured_path or None)
-    if path is None:
-        return False, "未找到 soffice.exe", ""
-    if platform.system() == "Darwin":
-        return (
-            True,
-            "已检测到路径；macOS 开发环境不执行 soffice，正式转换仅在 Windows 验收",
-            str(path),
-        )
-    if os.name != "nt":
-        return True, "已检测到路径；当前非 Windows，未执行转换测试", str(path)
-    try:
-        result = subprocess.run(
-            [str(path), "--headless", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"命令执行失败：{exc}", str(path)
-    detail = (result.stdout or result.stderr or "无版本信息").strip()
-    return result.returncode == 0, detail, str(path)
-
-
-def _check_sumatra(configured_path: str) -> tuple[bool, str, str]:
-    path = find_sumatra(configured_path or None)
-    if path is None:
-        return False, "未找到 SumatraPDF.exe", ""
-    if os.name != "nt":
-        return True, "已检测到路径；非 Windows 环境不执行打印测试", str(path)
-    return True, "路径可访问；实际静默打印需用现场打印机验收", str(path)
-
-
-def _check_code128_font() -> tuple[bool, str]:
-    candidates: list[Path] = []
-    if os.name == "nt":
-        fonts_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-        candidates.extend(
-            fonts_dir / name
-            for name in (
-                "code128.ttf",
-                "code128-1.ttf",
-                "Code128.ttf",
-                "CODE128.TTF",
-            )
-        )
-        try:
-            import winreg
-
-            key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
-                index = 0
-                while True:
-                    try:
-                        name, value, _ = winreg.EnumValue(key, index)
-                    except OSError:
-                        break
-                    if "code" in name.lower() and "128" in name.lower():
-                        return True, f"注册字体：{name} ({value})"
-                    index += 1
-        except (ImportError, OSError):
-            pass
-    else:
-        for fonts_dir in (
-            Path("/Library/Fonts"),
-            Path.home() / "Library/Fonts",
-            Path("/usr/share/fonts"),
-        ):
-            if fonts_dir.is_dir():
-                try:
-                    candidates.extend(
-                        path
-                        for path in fonts_dir.iterdir()
-                        if "code" in path.name.lower()
-                        and "128" in path.name.lower()
-                    )
-                except OSError:
-                    pass
-    for candidate in candidates:
-        if candidate.is_file():
-            return True, str(candidate)
-    return False, "未检测到 Code128 字体；Windows 正式部署必须安装"
 
 
 def _check_writable(directory: Path) -> tuple[bool, str]:
@@ -197,6 +109,22 @@ def _printer_status(configured_name: str) -> tuple[str, list[str], bool | None]:
     return default, printers, exists
 
 
+def _configured_printer_check(
+    printer_name: str, exists: bool | None
+) -> str:
+    if not printer_name:
+        return "未配置，将使用 Windows 默认打印机"
+    if exists is True:
+        return f"已找到指定打印机：{printer_name}"
+    if exists is False:
+        return (
+            f"未找到指定打印机“{printer_name}”，"
+            "请运行 Get-Printer | Select-Object Name，"
+            "并修改 config.json"
+        )
+    return "无法读取打印机列表，请检查 pywin32 和打印服务"
+
+
 def collect_runtime(config_path: Path) -> dict[str, Any]:
     config = load_config(config_path)
     template_path = _resolve_project_path(config.template_path)
@@ -204,13 +132,6 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
     database_path = _resolve_project_path(config.database_path)
     logs_dir = PROJECT_ROOT / "logs"
 
-    libreoffice_ok, libreoffice_detail, libreoffice_path = _check_libreoffice(
-        config.libreoffice_path
-    )
-    sumatra_ok, sumatra_detail, sumatra_path = _check_sumatra(
-        config.sumatra_path
-    )
-    code128_ok, code128_detail = _check_code128_font()
     excel_com_ok, excel_com_detail = is_excel_com_available()
     default_printer, printers, configured_printer_exists = _printer_status(
         config.printer_name
@@ -218,6 +139,9 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
     output_writable, output_detail = _check_writable(output_dir)
     logs_writable, logs_detail = _check_writable(logs_dir)
     sqlite_ok, sqlite_detail = _check_sqlite(database_path)
+    configured_printer_check = _configured_printer_check(
+        config.printer_name, configured_printer_exists
+    )
 
     return {
         "Windows/系统版本": platform.platform(),
@@ -225,18 +149,7 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
         "Microsoft Excel COM可用": excel_com_ok,
         "Microsoft Excel COM详情": excel_com_detail,
         "pywin32已安装": _module_available("win32com"),
-        "LibreOffice找到（兼容备用）": libreoffice_ok,
-        "LibreOffice路径": libreoffice_path or "未找到",
-        "LibreOffice详情": libreoffice_detail,
-        "SumatraPDF找到（兼容备用）": sumatra_ok,
-        "SumatraPDF路径": sumatra_path or "未找到",
-        "SumatraPDF详情": sumatra_detail,
-        "Code128字体检测到（font备用模式）": code128_ok,
-        "Code128字体详情": (
-            code128_detail
-            if config.barcode_mode == "font"
-            else "image 模式不依赖 Code128 字体"
-        ),
+        "正式打印方式": "Excel COM Worksheet.PrintOut",
         "条码模式": config.barcode_mode,
         "PDF渲染器": config.pdf_renderer,
         "打印方式": config.print_method,
@@ -245,6 +158,7 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
         "当前默认打印机": default_printer,
         "config printer_name": config.printer_name or "未配置（使用默认打印机）",
         "config打印机存在": configured_printer_exists,
+        "指定打印机检查": configured_printer_check,
         "检测到的打印机": printers,
         "模板文件存在": template_path.is_file(),
         "模板路径": str(template_path.resolve()),
@@ -254,7 +168,6 @@ def collect_runtime(config_path: Path) -> dict[str, Any]:
         "logs详情": logs_detail,
         "SQLite数据库可访问": sqlite_ok,
         "SQLite详情": sqlite_detail,
-        "enable_office_pdf_on_mac": config.enable_office_pdf_on_mac,
         "当前平台PDF策略": (
             "Excel COM -> ReportLab fallback"
             if os.name == "nt"

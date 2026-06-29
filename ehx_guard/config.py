@@ -10,12 +10,9 @@ from pathlib import Path
 @dataclass(frozen=True)
 class RuntimeConfig:
     printer_name: str = ""
-    libreoffice_path: str = ""
-    sumatra_path: str = ""
     template_path: str = "报交下线单模板.xlsx"
     output_pdf_dir: str = "output/pdf"
     database_path: str = "data/ehx_guard.db"
-    enable_office_pdf_on_mac: bool = False
     reserved1_sub: str = "2918"
     box_scan_count: int = 6
     line_name: str = "EHX"
@@ -46,10 +43,6 @@ def load_config(path: str | Path = "config.json") -> RuntimeConfig:
     defaults = RuntimeConfig()
     return RuntimeConfig(
         printer_name=str(raw.get("printer_name", defaults.printer_name)).strip(),
-        libreoffice_path=str(
-            raw.get("libreoffice_path", defaults.libreoffice_path)
-        ).strip(),
-        sumatra_path=str(raw.get("sumatra_path", defaults.sumatra_path)).strip(),
         template_path=str(
             raw.get("template_path", defaults.template_path)
         ).strip(),
@@ -59,12 +52,6 @@ def load_config(path: str | Path = "config.json") -> RuntimeConfig:
         database_path=str(
             raw.get("database_path", defaults.database_path)
         ).strip(),
-        enable_office_pdf_on_mac=bool(
-            raw.get(
-                "enable_office_pdf_on_mac",
-                defaults.enable_office_pdf_on_mac,
-            )
-        ),
         reserved1_sub=str(
             raw.get("reserved1_sub", defaults.reserved1_sub)
         ).strip()

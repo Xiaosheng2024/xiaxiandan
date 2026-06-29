@@ -28,13 +28,11 @@ def main() -> None:
     if not str(data.get("reserved1_sub", "")).strip():
         data["reserved1_sub"] = config.reserved1_sub
     template = args.template or Path(config.template_path)
-    soffice = args.soffice or (
-        Path(config.libreoffice_path) if config.libreoffice_path else None
-    )
     generator = A5PdfGenerator(
         template,
-        soffice_path=soffice,
-        enable_office_pdf_on_mac=config.enable_office_pdf_on_mac,
+        soffice_path=args.soffice,
+        enable_libreoffice=False,
+        enable_office_pdf_on_mac=False,
         barcode_mode=config.barcode_mode,
         barcode_show_text=config.barcode_show_text,
         barcode_output_dir=config.barcode_output_dir,

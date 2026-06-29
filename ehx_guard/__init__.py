@@ -9,7 +9,6 @@ from .printing import (
     DebugNoPrintPrinter,
     ExcelComPrinter,
     PrintResult,
-    SumatraPdfPrinter,
 )
 
 __all__ = [
@@ -19,5 +18,4 @@ __all__ = [
     "PrintResult",
     "ExcelComPrinter",
     "DebugNoPrintPrinter",
-    "SumatraPdfPrinter",
 ]
