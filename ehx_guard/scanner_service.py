@@ -214,6 +214,34 @@ class ScannerService:
     def retry_current_box(self) -> ScanOutcome:
         return self._finalize_current_box("")
 
+    def reset_current_box(
+        self, reason: str = "manual reset"
+    ) -> BoxState:
+        """逻辑作废当前未完成箱，并以相同目标数量初始化空箱。"""
+
+        current = self.state
+        order = self.database.get_order(current.offline_order_no)
+        if int(order["printed"]) or order["status"] in {
+            "PRINTED",
+            "PDF_ONLY",
+        }:
+            raise ValueError(
+                "已完成箱不能重置，请通过历史记录查看或补打。"
+            )
+
+        voided_count = self.database.reset_order(
+            current.offline_order_no,
+            reason=reason,
+        )
+        self.logger.warning(
+            "当前箱已重置：order=%s voided_records=%s reason=%s",
+            current.offline_order_no,
+            voided_count,
+            reason,
+        )
+        self._order = self._create_next_order(current.required_count)
+        return self.state
+
     def reprint(self, offline_order_no: str) -> PrintResult:
         order = self.database.get_order(offline_order_no)
         pdf_path = Path(order["pdf_path"])
@@ -391,8 +419,12 @@ class ScannerService:
             printed=not print_result.skipped,
         )
 
-    def _create_next_order(self) -> dict[str, Any]:
+    def _create_next_order(
+        self, initial_required_count: int = 0
+    ) -> dict[str, Any]:
         stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
         return self.database.create_order(
-            f"EHX{stamp}", f"BOX{stamp}", 0
+            f"EHX{stamp}",
+            f"BOX{stamp}",
+            max(0, int(initial_required_count)),
         )

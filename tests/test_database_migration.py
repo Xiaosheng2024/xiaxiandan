@@ -50,6 +50,32 @@ class DatabaseMigrationTest(unittest.TestCase):
                     offline_order_no, box_no, qty, status,
                     created_at, updated_at
                 ) VALUES ('ORDER-1', 'BOX-1', 10, 'PRINTED', 'now', 'now');
+
+                CREATE TABLE scan_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    offline_order_no TEXT NOT NULL,
+                    box_no TEXT NOT NULL,
+                    material_code TEXT NOT NULL DEFAULT '',
+                    material_name TEXT NOT NULL DEFAULT '',
+                    customer_material_code TEXT NOT NULL DEFAULT '',
+                    barcode TEXT NOT NULL,
+                    scan_index INTEGER NOT NULL,
+                    scan_time TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT '',
+                    printed INTEGER NOT NULL DEFAULT 0,
+                    computer_name TEXT NOT NULL DEFAULT '',
+                    line_name TEXT NOT NULL DEFAULT '',
+                    station_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO scan_records (
+                    offline_order_no, box_no, barcode, scan_index,
+                    scan_time, result, created_at
+                ) VALUES (
+                    'ORDER-1', 'BOX-1', 'OLD-BARCODE', 1,
+                    'now', '成功', 'now'
+                );
                 """
             )
             connection.commit()
@@ -62,6 +88,24 @@ class DatabaseMigrationTest(unittest.TestCase):
             self.assertEqual(44, materials[0]["box_scan_count"])
             self.assertEqual(10, order["required_count"])
             self.assertEqual(10, order["qty"])
+            with database.connect() as connection:
+                scan_columns = {
+                    row["name"]
+                    for row in connection.execute(
+                        "PRAGMA table_info(scan_records)"
+                    ).fetchall()
+                }
+                index_sql = connection.execute(
+                    """
+                    SELECT sql FROM sqlite_master
+                    WHERE type = 'index'
+                      AND name = 'uq_scan_records_success_barcode'
+                    """
+                ).fetchone()["sql"]
+            self.assertTrue(
+                {"is_voided", "void_reason", "voided_at"} <= scan_columns
+            )
+            self.assertIn("is_voided = 0", index_sql)
 
 
 if __name__ == "__main__":

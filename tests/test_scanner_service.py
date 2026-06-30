@@ -20,6 +20,7 @@ MATERIAL_B = Material(
 )
 BARCODE_A1 = "5664620-CLBK0620260616001"
 BARCODE_A2 = "5664620-CLBK0620260616002"
+BARCODE_A3 = "5664620-CLBK0620260616003"
 BARCODE_B1 = "5664618-CLBK0620260616001"
 BARCODE_B2 = "5664618-CLBK0620260616002"
 
@@ -290,7 +291,6 @@ class ScannerServiceTest(unittest.TestCase):
         self.assertEqual(
             2, self.database.get_order(order_no)["required_count"]
         )
-
         self.database.upsert_materials(
             [
                 Material(
@@ -304,6 +304,61 @@ class ScannerServiceTest(unittest.TestCase):
         self.assertEqual(
             2, self.database.get_order(order_no)["required_count"]
         )
+
+    def test_reset_voids_records_and_allows_same_barcodes_again(self) -> None:
+        service = self._service(box_count=44, material_a_count=44)
+        old_order_no = service.state.offline_order_no
+        for barcode in (BARCODE_A1, BARCODE_A2, BARCODE_A3):
+            outcome = service.process_barcode(barcode)
+            self.assertTrue(outcome.accepted)
+        self.assertEqual(3, service.state.scanned_count)
+        self.assertEqual(44, service.state.required_count)
+
+        reset_state = service.reset_current_box()
+        self.assertNotEqual(old_order_no, reset_state.offline_order_no)
+        self.assertEqual("", reset_state.material_code)
+        self.assertEqual(0, reset_state.scanned_count)
+        self.assertEqual(44, reset_state.required_count)
+        self.assertEqual("RESET", self.database.get_order(old_order_no)["status"])
+
+        old_records = self.database.history_by_order(old_order_no)
+        self.assertEqual(3, len(old_records))
+        self.assertTrue(all(row["is_voided"] == 1 for row in old_records))
+        self.assertTrue(
+            all(row["void_reason"] == "manual reset" for row in old_records)
+        )
+        self.assertTrue(all(row["voided_at"] for row in old_records))
+
+        rescanned = service.process_barcode(BARCODE_A1)
+        self.assertTrue(rescanned.accepted)
+        self.assertEqual(1, rescanned.state.scanned_count)
+        barcode_history = self.database.history_by_barcode(BARCODE_A1)
+        self.assertEqual(2, len(barcode_history))
+        self.assertEqual(1, sum(not row["is_voided"] for row in barcode_history))
+
+    def test_completed_box_cannot_be_reset(self) -> None:
+        service = self._service(box_count=2)
+        order_no = service.state.offline_order_no
+        self.database.mark_printed(order_no)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "已完成箱不能重置，请通过历史记录查看或补打",
+        ):
+            service.reset_current_box()
+
+    def test_empty_box_can_be_reset_and_retry_remains_independent(self) -> None:
+        service = self._service(box_count=6)
+        old_order_no = service.state.offline_order_no
+
+        state = service.reset_current_box()
+        self.assertNotEqual(old_order_no, state.offline_order_no)
+        self.assertEqual(0, state.scanned_count)
+        self.assertEqual("RESET", self.database.get_order(old_order_no)["status"])
+
+        retry = service.retry_current_box()
+        self.assertEqual("未满箱", retry.result)
+        self.assertEqual(state.offline_order_no, service.state.offline_order_no)
 
 
 if __name__ == "__main__":

@@ -115,10 +115,10 @@ class MainWindow(QWidget):
         root.setContentsMargins(24, 18, 24, 18)
         root.setSpacing(14)
 
-        title_row = QHBoxLayout()
+        self.title_row = QHBoxLayout()
         title = QLabel("EHX 下线防错")
         title.setFont(QFont("Microsoft YaHei", 28, QFont.Weight.Bold))
-        title_row.addWidget(title)
+        self.title_row.addWidget(title)
         mode_text = (
             "macOS 调试模式：只生成PDF，不打印"
             if platform.system() == "Darwin"
@@ -130,8 +130,8 @@ class MainWindow(QWidget):
             " border-radius: 8px;"
         )
         mode_label.setFont(QFont("Microsoft YaHei", 14, QFont.Weight.Bold))
-        title_row.addWidget(mode_label)
-        title_row.addStretch(1)
+        self.title_row.addWidget(mode_label)
+        self.title_row.addStretch(1)
         self.progress_big_label = QLabel("0/0")
         self.progress_big_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress_big_label.setMinimumWidth(240)
@@ -143,18 +143,30 @@ class MainWindow(QWidget):
             " border: 3px solid #0f172a; border-radius: 12px;"
             " padding: 2px 18px;"
         )
-        title_row.addWidget(self.progress_big_label)
-        title_row.addStretch(1)
         materials_button = QPushButton("物料查看 / 重新导入")
         materials_button.clicked.connect(self._open_materials)
         history_button = QPushButton("历史查询 / 补打")
         history_button.clicked.connect(self._open_history)
         retry_button = QPushButton("重试满箱处理")
         retry_button.clicked.connect(self._retry_finalize)
-        title_row.addWidget(materials_button)
-        title_row.addWidget(history_button)
-        title_row.addWidget(retry_button)
-        root.addLayout(title_row)
+        self.reset_button = QPushButton("重置当前箱")
+        self.reset_button.clicked.connect(self._confirm_reset_current_box)
+        self.title_row.addWidget(materials_button)
+        self.title_row.addWidget(history_button)
+        self.title_row.addWidget(retry_button)
+        self.title_row.addWidget(self.reset_button)
+        root.addLayout(self.title_row)
+
+        # 复用同一个大号进度控件，放在顶部按钮下方的右侧中上区域。
+        self.progress_row = QHBoxLayout()
+        self.progress_row.addStretch(3)
+        self.progress_row.addWidget(
+            self.progress_big_label,
+            0,
+            Qt.AlignmentFlag.AlignCenter,
+        )
+        self.progress_row.addStretch(1)
+        root.addLayout(self.progress_row)
 
         info = QGridLayout()
         info.setSpacing(12)
@@ -247,6 +259,40 @@ class MainWindow(QWidget):
         self._refresh_outcome_state(previous_state, outcome)
         self._refresh_recent()
 
+    def _confirm_reset_current_box(self) -> None:
+        confirmation = QMessageBox(self)
+        confirmation.setWindowTitle("重置当前箱")
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setText(
+            "确认要重置当前箱吗？\n"
+            "当前已扫码记录将作废，本箱将从 0 重新开始。"
+        )
+        confirm_button = confirmation.addButton(
+            "确认重置",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        confirmation.addButton(
+            "取消",
+            QMessageBox.ButtonRole.RejectRole,
+        )
+        confirmation.exec()
+        if confirmation.clickedButton() is not confirm_button:
+            self.scan_input.setFocus()
+            return
+
+        try:
+            state = self.service.reset_current_box("manual reset")
+        except (KeyError, ValueError, RuntimeError) as exc:
+            QApplication.beep()
+            self.show_error_popup("重置当前箱失败", str(exc))
+            return
+
+        self._refresh_state(state)
+        self._refresh_recent()
+        self._show_status("待扫码", "当前箱已重置，请重新扫码")
+        self.scan_input.clear()
+        self.scan_input.setFocus()
+
     def _show_status(self, result: str, message: str) -> None:
         color = STATUS_COLORS.get(result, STATUS_COLORS["待扫码"])
         self.status_label.setText(f"{result}：{message}")
@@ -280,12 +326,17 @@ class MainWindow(QWidget):
         rows = self.service.database.recent_records(10)
         self.recent_table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
+            is_voided = bool(row.get("is_voided", 0))
             values = [
                 row["scan_time"][11:19],
                 row["barcode"],
                 row["material_code"],
-                row["result"],
-                row["message"],
+                "已作废" if is_voided else row["result"],
+                (
+                    f"{row.get('void_reason', '')}（已重置）"
+                    if is_voided
+                    else row["message"]
+                ),
             ]
             for column, value in enumerate(values):
                 self.recent_table.setItem(
@@ -406,7 +457,7 @@ class HistoryDialog(QDialog):
         controls.addWidget(reprint_button)
         root.addLayout(controls)
 
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 12)
         self.table.setHorizontalHeaderLabels(
             [
                 "下线单号",
@@ -417,6 +468,9 @@ class HistoryDialog(QDialog):
                 "顺序",
                 "扫码时间",
                 "结果",
+                "记录状态",
+                "作废原因",
+                "作废时间",
                 "已打印",
             ]
         )
@@ -450,6 +504,7 @@ class HistoryDialog(QDialog):
     def _populate(self, rows: list[dict]) -> None:
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
+            is_voided = bool(row.get("is_voided", 0))
             values = [
                 row["offline_order_no"],
                 row["box_no"],
@@ -459,6 +514,9 @@ class HistoryDialog(QDialog):
                 row["scan_index"],
                 row["scan_time"],
                 row["result"],
+                "已作废/重置" if is_voided else "有效",
+                row.get("void_reason", "") if is_voided else "",
+                row.get("voided_at", "") or "",
                 "是" if row["printed"] else "否",
             ]
             for column, value in enumerate(values):

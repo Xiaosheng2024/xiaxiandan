@@ -87,6 +87,9 @@ class Database:
                     computer_name TEXT NOT NULL DEFAULT '',
                     line_name TEXT NOT NULL DEFAULT '',
                     station_name TEXT NOT NULL DEFAULT '',
+                    is_voided INTEGER NOT NULL DEFAULT 0,
+                    void_reason TEXT NOT NULL DEFAULT '',
+                    voided_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (offline_order_no)
                         REFERENCES offline_orders(offline_order_no)
@@ -143,6 +146,43 @@ class Database:
             connection.execute(
                 "UPDATE offline_orders SET required_count = qty"
             )
+
+        scan_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(scan_records)"
+            ).fetchall()
+        }
+        if "is_voided" not in scan_columns:
+            connection.execute(
+                """
+                ALTER TABLE scan_records
+                ADD COLUMN is_voided INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        if "void_reason" not in scan_columns:
+            connection.execute(
+                """
+                ALTER TABLE scan_records
+                ADD COLUMN void_reason TEXT NOT NULL DEFAULT ''
+                """
+            )
+        if "voided_at" not in scan_columns:
+            connection.execute(
+                "ALTER TABLE scan_records ADD COLUMN voided_at TEXT"
+            )
+
+        # 只约束有效成功记录；已作废条码保留追溯并允许再次扫码。
+        connection.execute(
+            "DROP INDEX IF EXISTS uq_scan_records_success_barcode"
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX uq_scan_records_success_barcode
+            ON scan_records(barcode)
+            WHERE result = '成功' AND is_voided = 0
+            """
+        )
 
     def upsert_materials(self, materials: Iterable[Any]) -> int:
         result = self.sync_materials(materials, disable_missing=False)
@@ -336,7 +376,9 @@ class Database:
             row = connection.execute(
                 """
                 SELECT 1 FROM scan_records
-                WHERE barcode = ? AND result = '成功'
+                WHERE barcode = ?
+                  AND result = '成功'
+                  AND is_voided = 0
                 LIMIT 1
                 """,
                 (barcode,),
@@ -348,7 +390,9 @@ class Database:
             row = connection.execute(
                 """
                 SELECT count(*) FROM scan_records
-                WHERE offline_order_no = ? AND result = '成功'
+                WHERE offline_order_no = ?
+                  AND result = '成功'
+                  AND is_voided = 0
                 """,
                 (offline_order_no,),
             ).fetchone()
@@ -405,7 +449,9 @@ class Database:
             rows = connection.execute(
                 """
                 SELECT * FROM scan_records
-                WHERE offline_order_no = ? AND result = '成功'
+                WHERE offline_order_no = ?
+                  AND result = '成功'
+                  AND is_voided = 0
                 ORDER BY scan_index, id
                 """,
                 (offline_order_no,),
@@ -439,6 +485,57 @@ class Database:
                 parameters,
             )
 
+    def reset_order(
+        self,
+        offline_order_no: str,
+        *,
+        reason: str = "manual reset",
+    ) -> int:
+        """逻辑作废未完成箱及其扫码记录，返回作废记录数量。"""
+
+        now = _now()
+        with self.connect() as connection:
+            order = connection.execute(
+                """
+                SELECT status, printed
+                FROM offline_orders
+                WHERE offline_order_no = ?
+                """,
+                (offline_order_no,),
+            ).fetchone()
+            if order is None:
+                raise KeyError(f"下线单不存在：{offline_order_no}")
+            if int(order["printed"]) or order["status"] in {
+                "PRINTED",
+                "PDF_ONLY",
+            }:
+                raise ValueError(
+                    "已完成箱不能重置，请通过历史记录查看或补打。"
+                )
+            if order["status"] == "RESET":
+                raise ValueError("当前箱已经重置")
+
+            connection.execute(
+                """
+                UPDATE offline_orders
+                SET status = 'RESET', updated_at = ?
+                WHERE offline_order_no = ?
+                """,
+                (now, offline_order_no),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE scan_records
+                SET is_voided = 1,
+                    void_reason = ?,
+                    voided_at = ?
+                WHERE offline_order_no = ?
+                  AND is_voided = 0
+                """,
+                (reason, now, offline_order_no),
+            )
+            return int(cursor.rowcount)
+
     def mark_printed(self, offline_order_no: str, *, reprint: bool = False) -> None:
         now = _now()
         with self.connect() as connection:
@@ -458,7 +555,9 @@ class Database:
             connection.execute(
                 """
                 UPDATE scan_records SET printed = 1
-                WHERE offline_order_no = ? AND result = '成功'
+                WHERE offline_order_no = ?
+                  AND result = '成功'
+                  AND is_voided = 0
                 """,
                 (offline_order_no,),
             )
