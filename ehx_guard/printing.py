@@ -10,6 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 @dataclass(frozen=True)
 class PrintResult:
     success: bool
@@ -49,7 +53,7 @@ class ExcelComPrinter:
             return self._failure(
                 path, selected_printer, f"打印模板副本不存在：{workbook_path}"
             )
-        if os.name != "nt":
+        if not _is_windows():
             return self._failure(
                 path, selected_printer, "Excel COM 打印仅支持 Windows"
             )

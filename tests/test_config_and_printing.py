@@ -30,7 +30,10 @@ class ConfigAndPrintingTest(unittest.TestCase):
             pdf_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
             xlsx_path.write_bytes(b"fake workbook")
             printer = ExcelComPrinter(printer_name="Test Printer")
-            with patch("ehx_guard.printing.os.name", "posix"):
+            with patch(
+                "ehx_guard.printing._is_windows",
+                return_value=False,
+            ):
                 result = printer.print_pdf(pdf_path)
             self.assertFalse(result.success)
             self.assertTrue(pdf_path.is_file())
